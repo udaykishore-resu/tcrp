@@ -1,0 +1,304 @@
+# Alerting rules. Every metric name below is registered in the source; none is
+# invented. docs/slo.md carries the reasoning and the objectives these serve.
+#
+# Requires the Prometheus Operator (monitoring.coreos.com/v1). Without it, lift
+# the `groups` block into a plain prometheus.rules.yml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: tcrp
+  namespace: tcrp
+  labels:
+    app.kubernetes.io/name: tcrp
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+
+    # -----------------------------------------------------------------------
+    # Correctness. These have no error budget: the acceptable rate is zero.
+    # -----------------------------------------------------------------------
+    - name: tcrp.correctness
+      interval: 30s
+      rules:
+
+        - alert: TCRPBridgeSupplyDelta
+          expr: abs(tcrp_bridge_supply_delta) != 0
+          for: 1m
+          labels:
+            severity: page
+            component: bridge
+          annotations:
+            summary: "Bridge supply delta is {{ $value }} on {{ $labels.direction }}"
+            description: >-
+              Units exist on one settlement network that are not backed on the
+              other. Conformance invariant SETTLE-1 asserts this is always zero.
+              Do not restart anything; stop the relayer and reconcile.
+            runbook_url: "docs/runbook.md#metrics"
+
+        - alert: TCRPBridgeSupplyBreaks
+          expr: tcrp_bridge_supply_breaks > 0
+          for: 5m
+          labels: {severity: page, component: bridge}
+          annotations:
+            summary: "{{ $value }} open bridge supply break(s)"
+
+        - alert: TCRPBridgeAlert
+          # AlertFinalityViolation is the one that matters: a post-finality reorg
+          # means units were minted against collateral that no longer exists, and
+          # the relayer deliberately does not repair it. A human decides.
+          expr: increase(tcrp_bridge_alerts_total[10m]) > 0
+          labels: {severity: page, component: bridge}
+          annotations:
+            summary: "Bridge alert raised on {{ $labels.direction }}"
+            description: >-
+              Check the alert kind. finality_violation means no safe automatic
+              repair exists. quorum_unavailable means too few signers were
+              reachable.
+
+        - alert: TCRPPolicyRuleEvaluationErrors
+          # A rule condition that did not produce a boolean contributed nothing
+          # to the decision. The gateway is running with fewer rules than it
+          # believes it has, and nothing else surfaces that.
+          expr: increase(tcrp_policy_rule_errors_total[5m]) > 0
+          labels: {severity: page, component: policy}
+          annotations:
+            summary: "A policy rule failed to evaluate"
+            description: >-
+              A condition did not produce a boolean — a bad bundle edit, or an
+              input shape the rule did not expect. The rule is not being applied.
+            runbook_url: "docs/runbook.md#metrics"
+
+        - alert: TCRPRiskCalculationErrors
+          expr: increase(tcrp_risk_calculation_errors_total[10m]) > 0
+          labels: {severity: page, component: risk}
+          annotations:
+            summary: "Risk calculation error"
+            description: >-
+              Usually a missing FX rate or a malformed snapshot. Both are bugs;
+              a missing rate is an error rather than an implicit 1:1 precisely
+              so it surfaces here.
+
+    # -----------------------------------------------------------------------
+    # Availability.
+    # -----------------------------------------------------------------------
+    - name: tcrp.availability
+      interval: 30s
+      rules:
+
+        - alert: TCRPPlatformDown
+          expr: up{job=~"tcrp.*"} == 0
+          for: 2m
+          labels: {severity: page}
+          annotations:
+            summary: "{{ $labels.job }} target {{ $labels.instance }} is down"
+
+        - alert: TCRPHTTPErrorRate
+          expr: |
+            sum(rate(tcrp_http_requests_total{status="5xx"}[5m]))
+              / sum(rate(tcrp_http_requests_total[5m])) > 0.001
+          for: 10m
+          labels: {severity: warn}
+          annotations:
+            summary: "5xx rate is {{ $value | humanizePercentage }}"
+            description: "SLO is 99.9% non-5xx over 30 days: a 43m12s budget."
+
+        - alert: TCRPHTTPLatencyHigh
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le, route) (rate(tcrp_http_request_seconds_bucket[5m]))) > 0.25
+          for: 15m
+          labels: {severity: warn}
+          annotations:
+            summary: "p99 on {{ $labels.route }} is {{ $value }}s"
+
+    # -----------------------------------------------------------------------
+    # The guardrail. Budget exhaustion is not a latency problem; it is a change
+    # in what the platform enforces.
+    # -----------------------------------------------------------------------
+    - name: tcrp.guardrail
+      interval: 30s
+      rules:
+
+        - alert: TCRPGuardrailBudgetExceeded
+          expr: |
+            rate(tcrp_guard_budget_exceeded_total[5m])
+              / rate(tcrp_guard_inspections_total[5m]) > 0.001
+          for: 10m
+          labels: {severity: warn, component: guard}
+          annotations:
+            summary: "{{ $value | humanizePercentage }} of inspections exceeded the 100ms budget"
+            description: >-
+              The consequence is NOT uniform. read_only turns fail OPEN and are
+              going out uninspected; state_change and money_movement turns fail
+              CLOSED and are being blocked. Establish which matters here before
+              acting. Do not raise the budget to silence this.
+            runbook_url: "docs/runbook.md#the-guardrail-budget-is-being-exceeded"
+
+        - alert: TCRPGuardrailLatencyHigh
+          expr: |
+            histogram_quantile(0.99, rate(tcrp_guard_inspection_seconds_bucket[5m])) > 0.1
+          for: 10m
+          labels: {severity: warn, component: guard}
+          annotations:
+            summary: "Guardrail p99 is {{ $value }}s against a 100ms budget"
+
+        - alert: TCRPGuardrailStageSlow
+          expr: |
+            histogram_quantile(0.99, sum by (le, stage) (rate(tcrp_guard_stage_seconds_bucket[5m]))) > 0.03
+          for: 10m
+          labels: {severity: info, component: guard}
+          annotations:
+            summary: "Guardrail stage {{ $labels.stage }} p99 is {{ $value }}s against a 30ms stage budget"
+
+    # -----------------------------------------------------------------------
+    # Reconciliation and the lakehouse.
+    # -----------------------------------------------------------------------
+    - name: tcrp.reconciliation
+      interval: 60s
+      rules:
+
+        - alert: TCRPMissingInBookBreak
+          # Value moved on chain and the institution's books do not know. The
+          # highest-urgency break kind.
+          expr: increase(tcrp_lake_recon_breaks_total{kind="missing_in_book"}[15m]) > 0
+          labels: {severity: warn, component: lake}
+          annotations:
+            summary: "A missing_in_book reconciliation break opened"
+            runbook_url: "docs/runbook.md#a-reconciliation-break-opens"
+
+        - alert: TCRPReconciliationBreaksOpen
+          # The seeded dataset carries two permanent breaks by construction —
+          # missing_in_book for CP-DELTA and quantity_mismatch for CP-BRAVO — so
+          # the threshold accounts for them. A demo showing ZERO breaks means the
+          # reconciler is not running.
+          expr: tcrp_lake_recon_breaks_open > 5
+          for: 30m
+          labels: {severity: warn, component: lake}
+          annotations:
+            summary: "{{ $value }} reconciliation breaks awaiting investigation"
+
+        - alert: TCRPLateArrivalsElevated
+          # Data is arriving late. The bitemporal store handles it correctly —
+          # that is what it is for — but every risk cut taken during this period
+          # is a cut that will be restated.
+          expr: rate(tcrp_lake_silver_corrections_total[15m]) > 0.1
+          for: 15m
+          labels: {severity: warn, component: lake}
+          annotations:
+            summary: "Position corrections at {{ $value }}/s: an indexer is behind"
+
+        - alert: TCRPLakeIngestLag
+          expr: tcrp_lake_pipeline_lag > 1000
+          for: 15m
+          labels: {severity: warn, component: lake}
+
+        - alert: TCRPStreamConsumerLag
+          expr: tcrp_stream_consumer_lag > 10000
+          for: 15m
+          labels: {severity: warn, component: stream}
+
+    # -----------------------------------------------------------------------
+    # Risk, ledgers, bridge health.
+    # -----------------------------------------------------------------------
+    - name: tcrp.risk
+      interval: 60s
+      rules:
+
+        - alert: TCRPRiskRecomputeLag
+          expr: |
+            histogram_quantile(0.99, rate(tcrp_risk_recompute_lag_seconds_bucket[10m])) > 30
+          for: 10m
+          labels: {severity: warn, component: risk}
+          annotations:
+            summary: "Recompute lag p99 is {{ $value }}s"
+            description: "Figures on the dashboard are up to this far behind the ledger."
+
+        - alert: TCRPRiskBreachRaised
+          # First detections only, so a flapping limit is distinguishable from a
+          # limit broken once and left open.
+          expr: increase(tcrp_risk_breaches_raised_total[1h]) > 0
+          labels: {severity: info, component: risk}
+          annotations:
+            summary: "{{ $value }} new limit breach(es) raised"
+
+        - alert: TCRPBridgeQuorumDegrading
+          # The early-warning metric nobody thinks to watch. A quorum falling
+          # from 5-of-7 to 3-of-7 still settles; the histogram shifting left is
+          # the only signal before it stops settling entirely.
+          expr: |
+            histogram_quantile(0.5, rate(tcrp_bridge_quorum_signatures_bucket[15m])) < 3
+          for: 15m
+          labels: {severity: warn, component: bridge}
+          annotations:
+            summary: "Median quorum size is {{ $value }} signatures"
+
+        - alert: TCRPBridgeFlowsStuck
+          expr: tcrp_bridge_pending > 0
+          for: 30m
+          labels: {severity: warn, component: bridge}
+          annotations:
+            summary: "{{ $value }} bridge flow(s) waiting on finality, quorum or retry"
+
+        - alert: TCRPLedgerFinalityLagGrowing
+          expr: (tcrp_ledger_head_block - tcrp_ledger_finalised_block) > 64
+          for: 15m
+          labels: {severity: warn, component: ledger}
+          annotations:
+            summary: "Finality lag on {{ $labels.ledger }} is {{ $value }} blocks"
+            description: >-
+              The bridge will not mint until a lock is final, so this shows up as
+              pending flows before it shows up anywhere else.
+
+        - alert: TCRPLedgerReorg
+          expr: increase(tcrp_ledger_reorgs_total[15m]) > 0
+          labels: {severity: info, component: ledger}
+
+    # -----------------------------------------------------------------------
+    # Governance quality. Note what is NOT here.
+    # -----------------------------------------------------------------------
+    - name: tcrp.governance
+      interval: 5m
+      rules:
+
+        - alert: TCRPApprovalGateVolumeHigh
+          # Approval fatigue forming. Not an outage; a control degrading. A human
+          # who approves fifty gates a day approves the fifty-first without
+          # reading it, and that is the most likely way this platform's central
+          # control fails in practice.
+          expr: rate(tcrp_agent_approvals_requested_total[1h]) * 3600 > 50
+          for: 2h
+          labels: {severity: info, component: agent}
+          annotations:
+            summary: "{{ $value }} approval gates per hour"
+            description: "See docs/threat-model.md section 4."
+
+        - alert: TCRPGuardrailBlockRateShift
+          # An attack, or a guardrail regression. Distinguish by which surface
+          # the blocking findings are on: prompt is the former, output is usually
+          # grounding.
+          expr: |
+            rate(tcrp_agent_runs_blocked_total[1h])
+              / rate(tcrp_agent_runs_total[1h]) > 0.05
+          for: 1h
+          labels: {severity: info, component: agent}
+          annotations:
+            summary: "{{ $value | humanizePercentage }} of runs blocked by the guardrail"
+
+# ---------------------------------------------------------------------------
+# Deliberately absent
+# ---------------------------------------------------------------------------
+#
+# tcrp_agent_tool_denials_total. A denial is the gateway WORKING. Alerting on it
+# trains an operator to treat a successful control as a problem and creates
+# pressure to tune it down. The eval harness scores refusals separately from
+# executions for exactly the same reason — see docs/evaluation.md.
+#
+# tcrp_ledger_reverts_total. A revert is the ledger's compliance rule working. A
+# transfer to an unregistered address SHOULD revert.
+#
+# tcrp_lake_bronze_duplicates_total. Deduplication on the natural key is the
+# design, and a reorg re-including a transaction produces duplicates correctly.
+#
+# tcrp_guard_blocks_total in absolute terms. Only the rate relative to runs is
+# informative, and even that is severity: info.

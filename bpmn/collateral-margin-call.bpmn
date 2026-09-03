@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  id="tcrp-collateral"
+                  targetNamespace="https://tcrp.example/bpmn">
+  <bpmn:process id="tcrp-collateral-margin-call" name="Agent-assisted collateral margin call" isExecutable="true">
+
+    <bpmn:startEvent id="Start_Breach" name="Exposure breach detected">
+      <bpmn:outgoing>Flow_Start_Query</bpmn:outgoing>
+    </bpmn:startEvent>
+
+    <bpmn:serviceTask id="Task_QueryExposure" name="Query counterparty exposure">
+      <bpmn:incoming>Flow_Start_Query</bpmn:incoming>
+      <bpmn:outgoing>Flow_Query_Guard</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="Task_Guard" name="Inspect prompt, context and output">
+      <bpmn:incoming>Flow_Query_Guard</bpmn:incoming>
+      <bpmn:outgoing>Flow_Guard_Propose</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:task id="Task_Propose" name="Propose margin call">
+      <bpmn:incoming>Flow_Guard_Propose</bpmn:incoming>
+      <bpmn:outgoing>Flow_Propose_Policy</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:serviceTask id="Task_PolicyGate" name="Authorize at the policy gateway">
+      <bpmn:incoming>Flow_Propose_Policy</bpmn:incoming>
+      <bpmn:outgoing>Flow_Policy_Gateway</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:exclusiveGateway id="Gateway_Allowed" name="Allowed?">
+      <bpmn:incoming>Flow_Policy_Gateway</bpmn:incoming>
+      <bpmn:outgoing>Flow_Gateway_Approve</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Gateway_Refused</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:userTask id="Task_ApproveCall" name="Approve the margin call">
+      <bpmn:incoming>Flow_Gateway_Approve</bpmn:incoming>
+      <bpmn:outgoing>Flow_Approve_Issue</bpmn:outgoing>
+    </bpmn:userTask>
+
+    <bpmn:serviceTask id="Task_IssueCall" name="Issue the margin call">
+      <bpmn:incoming>Flow_Approve_Issue</bpmn:incoming>
+      <bpmn:outgoing>Flow_Issue_Settle</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="Task_SettleCollateral" name="Settle the collateral transfer">
+      <bpmn:incoming>Flow_Issue_Settle</bpmn:incoming>
+      <bpmn:outgoing>Flow_Settle_Seal</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="Task_SealAudit" name="Seal the audit chain">
+      <bpmn:incoming>Flow_Settle_Seal</bpmn:incoming>
+      <bpmn:outgoing>Flow_Seal_Done</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="End_Settled" name="Margin call settled">
+      <bpmn:incoming>Flow_Seal_Done</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:endEvent id="End_Refused" name="Refused and reported">
+      <bpmn:incoming>Flow_Gateway_Refused</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:sequenceFlow id="Flow_Start_Query"     sourceRef="Start_Breach"         targetRef="Task_QueryExposure" />
+    <bpmn:sequenceFlow id="Flow_Query_Guard"     sourceRef="Task_QueryExposure"   targetRef="Task_Guard" />
+    <bpmn:sequenceFlow id="Flow_Guard_Propose"   sourceRef="Task_Guard"           targetRef="Task_Propose" />
+    <bpmn:sequenceFlow id="Flow_Propose_Policy"  sourceRef="Task_Propose"         targetRef="Task_PolicyGate" />
+    <bpmn:sequenceFlow id="Flow_Policy_Gateway"  sourceRef="Task_PolicyGate"      targetRef="Gateway_Allowed" />
+    <bpmn:sequenceFlow id="Flow_Gateway_Approve" name="allow" sourceRef="Gateway_Allowed" targetRef="Task_ApproveCall" />
+    <bpmn:sequenceFlow id="Flow_Gateway_Refused" name="deny"  sourceRef="Gateway_Allowed" targetRef="End_Refused" />
+    <bpmn:sequenceFlow id="Flow_Approve_Issue"   sourceRef="Task_ApproveCall"     targetRef="Task_IssueCall" />
+    <bpmn:sequenceFlow id="Flow_Issue_Settle"    sourceRef="Task_IssueCall"       targetRef="Task_SettleCollateral" />
+    <bpmn:sequenceFlow id="Flow_Settle_Seal"     sourceRef="Task_SettleCollateral" targetRef="Task_SealAudit" />
+    <bpmn:sequenceFlow id="Flow_Seal_Done"       sourceRef="Task_SealAudit"       targetRef="End_Settled" />
+
+    <bpmn:textAnnotation id="Note_Trajectory">
+      <bpmn:text>The whole run is one trajectory and one trace.
+@invariant AGENT-4 every span in a run's trajectory carries the principal identity attributes
+@invariant AGENT-6 no run exceeded its step budget without a terminal record
+@evidence span:tcrp.run.id
+@evidence audit:agent.run.started</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Trajectory" sourceRef="Start_Breach" targetRef="Note_Trajectory" />
+
+    <bpmn:textAnnotation id="Note_Query">
+      <bpmn:text>@tier read_only
+@evidence audit:agent.tool.invoked</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Query" sourceRef="Task_QueryExposure" targetRef="Note_Query" />
+
+    <bpmn:textAnnotation id="Note_Guard">
+      <bpmn:text>@control guardrail
+@invariant AGENT-3 the guardrail ran on every prompt and every output of every run
+@evidence audit:guard.verdict
+@evidence span:tcrp.guard.verdict</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Guard" sourceRef="Task_Guard" targetRef="Note_Guard" />
+
+    <bpmn:textAnnotation id="Note_Propose">
+      <bpmn:text>@tier state_change</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Propose" sourceRef="Task_Propose" targetRef="Note_Propose" />
+
+    <bpmn:textAnnotation id="Note_Policy">
+      <bpmn:text>@control policy-gate
+@invariant AGENT-2 every tool invocation is preceded by an allowing policy decision for that tool
+@evidence audit:policy.decision
+@evidence policy:bundle</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Policy" sourceRef="Task_PolicyGate" targetRef="Note_Policy" />
+
+    <bpmn:textAnnotation id="Note_Refusal">
+      <bpmn:text>A refusal is terminal for this run. It is not a branch to route around.
+@invariant AGENT-7 a policy denial is never followed by the same tool succeeding in the same run
+@evidence audit:policy.decision</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Refusal" sourceRef="End_Refused" targetRef="Note_Refusal" />
+
+    <bpmn:textAnnotation id="Note_Approve">
+      <bpmn:text>@control four-eyes
+@invariant AGENT-1 no money-movement tool invocation without a granted approval from someone other than the requester
+@evidence audit:approval.granted
+@evidence span:tcrp.approval.id</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Approve" sourceRef="Task_ApproveCall" targetRef="Note_Approve" />
+
+    <bpmn:textAnnotation id="Note_Issue">
+      <bpmn:text>@tier money_movement
+@evidence audit:collateral.margin_call.issued</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Issue" sourceRef="Task_IssueCall" targetRef="Note_Issue" />
+
+    <bpmn:textAnnotation id="Note_Settle">
+      <bpmn:text>@tier money_movement
+@evidence audit:ledger.transfer.executed
+@evidence ledger:evm</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Settle" sourceRef="Task_SettleCollateral" targetRef="Note_Settle" />
+
+    <bpmn:textAnnotation id="Note_Seal">
+      <bpmn:text>@control hash-chain
+@invariant AGENT-5 the audit chain verifies end to end
+@evidence audit:chain</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Seal" sourceRef="Task_SealAudit" targetRef="Note_Seal" />
+
+  </bpmn:process>
+</bpmn:definitions>

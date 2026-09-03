@@ -1,0 +1,101 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: tcrp-platform
+  namespace: tcrp
+  labels:
+    app.kubernetes.io/name: tcrp
+    app.kubernetes.io/component: platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: tcrp
+    app.kubernetes.io/component: platform
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+
+  # An approval gate is a conversation across several requests: list the pending
+  # approvals, read one, grant it. None of that requires affinity for
+  # correctness — the approval is a persisted object and any replica can serve
+  # any step (ADR 0010) — but ClientIP keeps a browser session on one replica,
+  # which keeps the dashboard's view consistent while an approver is looking at
+  # it.
+  #
+  # If this is ever needed for correctness rather than for consistency of view,
+  # that is a bug in the store, not a reason to tighten the affinity.
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 1800
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tcrp-guard
+  namespace: tcrp
+  labels:
+    app.kubernetes.io/name: tcrp
+    app.kubernetes.io/component: guard
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: tcrp
+    app.kubernetes.io/component: guard
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+      protocol: TCP
+  # No affinity. Every inspection is independent and stateless, so spreading
+  # them is strictly better.
+---
+# A headless service for the platform, so a scrape or an operator can address
+# individual pods. Prometheus needs per-pod targets: tcrp_lake_recon_breaks_open
+# and tcrp_risk_open_breaches are gauges whose value differs per replica, and
+# scraping through the load-balanced Service would sample one replica at random
+# and report it as the whole.
+apiVersion: v1
+kind: Service
+metadata:
+  name: tcrp-platform-headless
+  namespace: tcrp
+  labels:
+    app.kubernetes.io/name: tcrp
+    app.kubernetes.io/component: platform
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: tcrp
+    app.kubernetes.io/component: platform
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+
+# ---------------------------------------------------------------------------
+# What is deliberately not here
+# ---------------------------------------------------------------------------
+#
+# No Ingress. It is cluster-specific (the controller, the TLS issuer, the
+# hostname, the auth annotations) and a generic one would be wrong everywhere.
+# Two things any Ingress in front of this MUST do:
+#
+#   1. Terminate TLS. The platform serves plaintext HTTP.
+#
+#   2. NOT expose /metrics, /healthz or /readyz. Those three sit outside /v1 and
+#      outside authentication, by design — a probe that needs a credential fails
+#      for the wrong reason, and a scrape endpoint that needs one does not get
+#      scraped. That design is correct inside the cluster and is an information
+#      disclosure on the public internet: /metrics carries
+#      tcrp_risk_open_breaches, tcrp_lake_recon_breaks_open and
+#      tcrp_bridge_supply_delta, which describe the institution's positions.
+#
+# No LoadBalancer or NodePort. Neither should ever be applied to the guardrail
+# Service: it is reachable only from the platform, and networkpolicy.yaml
+# enforces that.

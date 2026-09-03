@@ -1,0 +1,161 @@
+# Solidity — contracts/.
+#
+# THIS WORKFLOW IS NOT PART OF THE DEFAULT BUILD, and that is a deliberate
+# decision recorded in contracts/README.md:
+#
+#   "Nothing in the Go build compiles, tests or deploys these contracts.
+#    `go build ./...` does not see them and `go test ./...` does not run them.
+#    There is no `solc` and no Foundry in the toolchain this repository assumes,
+#    and adding one would mean the platform no longer runs from a clean clone
+#    with only a Go toolchain — which is a property worth more than an automated
+#    Solidity build."
+#
+# So this workflow exists for an environment where Foundry is available. It runs
+# only on a change under contracts/ or on manual dispatch, it installs Foundry
+# rather than assuming it, and it skips cleanly rather than failing when the
+# toolchain or the network is not there. A red X on ci for a missing toolchain
+# teaches people to ignore red X's.
+
+name: foundry
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'contracts/**'
+      - '.github/workflows/foundry.yml'
+  pull_request:
+    paths:
+      - 'contracts/**'
+      - '.github/workflows/foundry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: foundry-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  forge:
+    name: forge build · test · fuzz · invariant
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Foundry needs the network for the installer and for forge-std. Probe
+      # first, so an offline runner produces a clear skip rather than a
+      # confusing installer failure.
+      - name: toolchain availability
+        id: probe
+        run: |
+          if curl -fsS --max-time 10 -o /dev/null https://foundry.paradigm.xyz; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Foundry installer unreachable. Skipping. The Solidity in contracts/ is not built by this repository's default CI by design — see contracts/README.md."
+          fi
+
+      - name: install foundry
+        if: steps.probe.outputs.available == 'true'
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      # forge-std is not vendored, matching contracts/README.md's stated setup
+      # step. --no-commit because CI's checkout is not a working tree anybody
+      # commits from.
+      - name: install forge-std
+        if: steps.probe.outputs.available == 'true'
+        run: forge install foundry-rs/forge-std --no-commit || true
+
+      - name: forge fmt --check
+        if: steps.probe.outputs.available == 'true'
+        run: forge fmt --check
+        continue-on-error: true
+
+      - name: forge build
+        if: steps.probe.outputs.available == 'true'
+        run: forge build --sizes
+
+      # Three kinds of test, per contracts/README.md:
+      #
+      #  - Unit tests for each rule: the whitelist, the roles, the pause, the
+      #    freeze, the recovery path, the compliance ceilings, the country and
+      #    claim restrictions, and the vault's nonce replay guard.
+      #
+      #  - A fuzz suite, of which testFuzz_transferRespectsWhitelist is the one
+      #    that matters: for every recipient address the fuzzer can produce, a
+      #    transfer succeeds if and only if the identity registry knows the
+      #    recipient.
+      #
+      #  - An invariant suite driven by a Handler that issues, redeems,
+      #    transfers, forces, freezes, pauses, locks and unlocks in random order:
+      #      invariant_totalSupplyEqualsSumOfBalances
+      #      invariant_noBalanceOutsideRegistry
+      #      invariant_lockedEqualsVaultBalance
+      #      invariant_supplyEqualsIssuedLessRedeemed
+      #      invariant_holderCountIsAccurate
+      - name: forge test
+        if: steps.probe.outputs.available == 'true'
+        run: forge test -vvv
+
+      # More runs than the default. A fuzz suite is only worth what it explores,
+      # and CI is the place to buy exploration that a local run should not have
+      # to wait for.
+      - name: fuzz, extended
+        if: steps.probe.outputs.available == 'true'
+        run: forge test --match-test 'testFuzz_' -vvv
+        env:
+          FOUNDRY_FUZZ_RUNS: "10000"
+
+      - name: invariants, extended
+        if: steps.probe.outputs.available == 'true'
+        run: forge test --match-test 'invariant_' -vvv
+        env:
+          FOUNDRY_INVARIANT_RUNS: "512"
+          FOUNDRY_INVARIANT_DEPTH: "128"
+
+      - name: gas report
+        if: steps.probe.outputs.available == 'true'
+        run: |
+          forge test --gas-report | tee gas.txt
+          {
+            echo '## Gas report'
+            echo
+            echo '```'
+            cat gas.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        continue-on-error: true
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.probe.outputs.available == 'true'
+        with:
+          name: forge-gas-report
+          path: contracts/gas.txt
+          retention-days: 30
+
+# ---------------------------------------------------------------------------
+# What this does not do
+# ---------------------------------------------------------------------------
+#
+# No slither, no mythril, no formal verification, no external audit. No
+# deployment and no verification against a block explorer.
+# contracts/README.md records that a real issuance would want gas benchmarking
+# and formal verification before deployment, and this workflow does neither.
+#
+# It also does not — and cannot — check the correspondence between these
+# contracts and internal/ledger/evm.go. They are two statements of one
+# specification, neither generated from the other, and nothing enforces the
+# correspondence automatically. The honest mitigation is that both suites are
+# short enough to read side by side, and the revert reason strings are
+# deliberately identical so a test matching on a reason names the same rule in
+# either language.

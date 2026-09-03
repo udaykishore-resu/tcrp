@@ -1,0 +1,135 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: tcrp-platform
+  namespace: tcrp
+  labels:
+    app.kubernetes.io/name: tcrp
+    app.kubernetes.io/component: platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tcrp-platform
+  minReplicas: 3
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      # Short window: a burst of runs is real load and the platform should meet
+      # it rather than queue behind an autoscaler's caution.
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      # Long window, and deliberately asymmetric with scale-up.
+      #
+      # Scaling down evicts a pod, and with the emptyDir in deployment.yaml that
+      # loses the state directory — which holds runs paused on approval gates.
+      # Even with a proper PVC or Postgres store, a run that is mid-tool-call
+      # when its pod goes away has to be resumed, and a run that is mid-audit-
+      # write leaves a chain with a partial final record.
+      #
+      # Ten minutes is longer than the 15-minute approval window is not, and
+      # that is intentional: this window is about in-flight runs, not about
+      # gates. The PodDisruptionBudget is what protects the gates.
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+      selectPolicy: Min
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: tcrp-guard
+  namespace: tcrp
+  labels:
+    app.kubernetes.io/name: tcrp
+    app.kubernetes.io/component: guard
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tcrp-guard
+  minReplicas: 4
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # Lower than the platform's 70%. The guardrail has a 100ms budget and
+          # exceeding it is not a latency regression, it is a change in
+          # behaviour: read-only turns fail OPEN and go out uninspected, while
+          # state-change and money-movement turns fail CLOSED and are blocked.
+          # Headroom here is control coverage, so it is bought earlier.
+          averageUtilization: 55
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+    scaleDown:
+      # The guardrail is stateless, so scaling it down loses nothing. Still
+      # unhurried, because the cost of being one replica short is losing
+      # inspection coverage and the cost of one replica extra is 200 millicores.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 120
+      selectPolicy: Min
+
+# ---------------------------------------------------------------------------
+# What this deliberately does not scale on, and what it should
+# ---------------------------------------------------------------------------
+#
+# CPU and memory are proxies. The metric that actually predicts a guardrail
+# budget breach is the inspection latency itself, and the right HPA rule is a
+# custom metric on it:
+#
+#   - type: Pods
+#     pods:
+#       metric:
+#         name: tcrp_guard_inspection_seconds_p99
+#       target:
+#         type: AverageValue
+#         averageValue: "50m"     # 50ms, half the 100ms budget
+#
+# That needs prometheus-adapter, which is a cluster-level dependency and is not
+# assumed here. It is the change to make first.
+#
+# For the platform, tcrp_http_requests_in_flight is the better signal than CPU,
+# for the same reason and with the same dependency.
+#
+# NOT a scaling signal, ever: tcrp_agent_approvals_requested_total. Approval
+# gates are bounded by human response time and adding replicas does nothing for
+# them. A rising gate rate is approval fatigue forming — see
+# docs/threat-model.md section 4 — and scaling in response would hide it.

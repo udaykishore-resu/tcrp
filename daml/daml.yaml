@@ -1,0 +1,19 @@
+sdk-version: 2.8.0
+name: tcrp-collateral
+version: 1.0.0
+source: .
+init-script: Test.Fund:testSelectiveDisclosure
+parties:
+  - Issuer
+  - Alpha
+  - Bravo
+  - Charlie
+  - BridgeVault
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+build-options:
+  # Warnings are errors. A shadowed binding in a choice body is the kind of
+  # thing that changes which party's authority a create runs under.
+  - --ghc-option=-Werror

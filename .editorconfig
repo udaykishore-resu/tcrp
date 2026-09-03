@@ -1,0 +1,44 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.go]
+indent_style = tab
+indent_size = 4
+
+[Makefile]
+indent_style = tab
+
+[*.{md,markdown}]
+# Two trailing spaces are a hard line break in Markdown.
+trim_trailing_whitespace = false
+max_line_length = 80
+
+[*.sol]
+indent_style = space
+indent_size = 4
+
+[*.daml]
+indent_style = space
+indent_size = 2
+
+[*.scala]
+indent_style = space
+indent_size = 2
+
+[*.{sql,sh}]
+indent_style = space
+indent_size = 2
+
+[*.{yml,yaml,json,bpmn,xml,html}]
+indent_style = space
+indent_size = 2
+
+[LICENSE]
+insert_final_newline = true

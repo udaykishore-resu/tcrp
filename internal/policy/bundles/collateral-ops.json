@@ -1,0 +1,150 @@
+{
+  "package": "tcrp.collateral.agent",
+  "version": "2026.09.1",
+  "description": "Authorization policy for the collateral-operations agent. Deny-overrides, deny by default. Amounts are in 1e-6 currency units, matching money.Amount.",
+  "default_effect": "deny",
+  "rules": [
+    {
+      "id": "deny-unauthenticated",
+      "description": "No decision is made for an unasserted principal.",
+      "effect": "deny",
+      "priority": 100,
+      "when": "input.principal.subject == \"\" || input.principal.subject == \"anonymous\"",
+      "reason": "no authenticated principal on the request"
+    },
+    {
+      "id": "deny-guardrail-block",
+      "description": "A guardrail block stops the call regardless of scope.",
+      "effect": "deny",
+      "priority": 100,
+      "when": "input.run.guard_verdict == \"block\"",
+      "reason": "the guardrail service blocked this turn"
+    },
+    {
+      "id": "deny-missing-scope",
+      "description": "The principal must hold every scope the tool declares.",
+      "effect": "deny",
+      "priority": 90,
+      "when": "size(input.tool.required_scopes) > 0 && !subset(input.tool.required_scopes, input.principal.scopes)",
+      "reason": "principal does not hold every scope required by this tool"
+    },
+    {
+      "id": "deny-state-change-on-untrusted-context",
+      "description": "Retrieved context that failed provenance checks may inform an answer but may never drive a state change.",
+      "effect": "deny",
+      "priority": 90,
+      "when": "input.tool.tier != \"read_only\" && input.run.retrieval_trusted == false",
+      "reason": "state-changing call is grounded in untrusted retrieved context"
+    },
+    {
+      "id": "deny-money-movement-without-recorded-approval",
+      "description": "Defence in depth: at dispatch time, money movement without a recorded approval is refused even if the propose-time decision allowed it.",
+      "effect": "deny",
+      "priority": 95,
+      "when": "input.run.stage == \"dispatch\" && input.tool.tier == \"money_movement\" && !input.approval.recorded",
+      "reason": "money movement requires a recorded human approval before dispatch"
+    },
+    {
+      "id": "deny-stale-approval",
+      "description": "An approval older than fifteen minutes no longer describes current market state.",
+      "effect": "deny",
+      "priority": 85,
+      "when": "input.approval.recorded && input.approval.age_s > 900",
+      "reason": "the recorded approval is older than the 900s freshness window"
+    },
+    {
+      "id": "deny-self-approval",
+      "description": "Four eyes: the human the agent is acting for cannot be the human who approves.",
+      "effect": "deny",
+      "priority": 85,
+      "when": "input.approval.recorded && input.approval.by != \"\" && (input.approval.by == input.principal.on_behalf || input.approval.by == input.principal.subject)",
+      "reason": "the approver is the requester; four-eyes control not satisfied"
+    },
+    {
+      "id": "deny-approver-without-authority",
+      "description": "Approvals are only meaningful from a role that carries the mandate.",
+      "effect": "deny",
+      "priority": 85,
+      "when": "input.approval.recorded && !intersects(input.approval.by_roles, [\"risk-manager\", \"treasurer\"])",
+      "reason": "the approver holds no role authorised to approve money movement"
+    },
+    {
+      "id": "deny-transfer-to-non-whitelisted",
+      "description": "The token is permissioned; a transfer outside the identity registry can only fail on-chain, and must not be attempted.",
+      "effect": "deny",
+      "priority": 90,
+      "when": "input.tool.tier == \"money_movement\" && input.resource.kind == \"transfer\" && !input.resource.whitelisted",
+      "reason": "destination is not in the identity registry whitelist"
+    },
+    {
+      "id": "deny-large-movement-on-single-approval",
+      "description": "Above 25,000,000 units of any currency, one approver is not enough.",
+      "effect": "deny",
+      "priority": 88,
+      "when": "input.run.stage == \"dispatch\" && input.tool.tier == \"money_movement\" && input.resource.amount_units > 25_000_000_000_000 && input.approval.count < 2",
+      "reason": "movements above 25,000,000 require two distinct approvers"
+    },
+    {
+      "id": "deny-experimental-tools-in-production",
+      "description": "Tools still under evaluation are not reachable from the production environment.",
+      "effect": "deny",
+      "priority": 80,
+      "when": "input.run.environment == \"production\" && startsWith(input.tool.name, \"experimental_\")",
+      "reason": "experimental tools are not enabled in production"
+    },
+    {
+      "id": "deny-runaway-run",
+      "description": "A run that has taken more than twenty steps or failed more than five tool calls is looping.",
+      "effect": "deny",
+      "priority": 80,
+      "when": "input.run.step > 20 || input.run.prior_failures > 5",
+      "reason": "run exceeded its step or failure budget"
+    },
+    {
+      "id": "allow-read-only",
+      "description": "Read-only queries for a principal holding the declared scopes.",
+      "effect": "allow",
+      "priority": 10,
+      "when": "input.tool.tier == \"read_only\" && subset(input.tool.required_scopes, input.principal.scopes)",
+      "reason": "read-only query within the principal's scopes"
+    },
+    {
+      "id": "allow-state-change-proposal",
+      "description": "Proposals do not move money; they are recorded and shown to a human.",
+      "effect": "allow",
+      "priority": 20,
+      "when": "input.tool.tier == \"state_change\" && subset(input.tool.required_scopes, input.principal.scopes) && intersects(input.principal.roles, [\"risk-analyst\", \"risk-manager\", \"collateral-ops\", \"treasurer\"])",
+      "reason": "proposal within scope for an operations or risk role",
+      "obligations": [
+        { "type": "simulate_first" },
+        { "type": "redact_pii" }
+      ]
+    },
+    {
+      "id": "allow-money-movement-dual-approved",
+      "description": "Large movements, with two approvers.",
+      "effect": "allow",
+      "priority": 40,
+      "when": "input.tool.tier == \"money_movement\" && subset(input.tool.required_scopes, input.principal.scopes) && input.resource.amount_units > 25_000_000_000_000",
+      "reason": "large money movement, subject to dual approval",
+      "obligations": [
+        { "type": "require_dual_approval", "params": { "roles": ["risk-manager", "treasurer"], "window_s": 900 } },
+        { "type": "simulate_first" },
+        { "type": "notify", "params": { "channel": "collateral-ops-oncall" } }
+      ]
+    },
+    {
+      "id": "allow-money-movement-single-approved",
+      "description": "Ordinary movements, with one approver.",
+      "effect": "allow",
+      "priority": 30,
+      "when": "input.tool.tier == \"money_movement\" && subset(input.tool.required_scopes, input.principal.scopes) && input.resource.amount_units <= 25_000_000_000_000",
+      "reason": "money movement within the single-approval threshold",
+      "obligations": [
+        { "type": "require_human_approval", "params": { "roles": ["risk-manager", "treasurer"], "window_s": 900 } },
+        { "type": "simulate_first" },
+        { "type": "rate_limit", "params": { "per_minute": 10 } }
+      ]
+    }
+  ]
+}

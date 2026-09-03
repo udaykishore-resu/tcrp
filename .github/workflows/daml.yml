@@ -1,0 +1,146 @@
+# Daml — daml/.
+#
+# THIS WORKFLOW IS NOT PART OF THE DEFAULT BUILD, for the reason daml/README.md
+# gives:
+#
+#   "Nothing in the Go build compiles or runs these templates. There is no Daml
+#    SDK in the toolchain this repository assumes, and adding one would mean the
+#    platform no longer runs from a clean clone with only a Go toolchain."
+#
+# It runs only on a change under daml/ or on manual dispatch, it installs the
+# SDK rather than assuming it, and it skips cleanly when the installer or the
+# network is unavailable. A red X for a missing toolchain teaches people to
+# ignore red X's.
+#
+# The SDK is a large download and a JDK dependency. That is the whole argument
+# for keeping it out of the default workflow.
+
+name: daml
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'daml/**'
+      - '.github/workflows/daml.yml'
+  pull_request:
+    paths:
+      - 'daml/**'
+      - '.github/workflows/daml.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daml-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  daml:
+    name: daml build · test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: daml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain availability
+        id: probe
+        run: |
+          if curl -fsS --max-time 15 -o /dev/null https://get.daml.com; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::The Daml installer is unreachable. Skipping. The Daml in daml/ is not built by this repository's default CI by design — see daml/README.md."
+          fi
+
+      # The SDK needs a JVM. It is not needed by anything else in this
+      # repository, which is the point of gating this workflow.
+      - name: set up JDK
+        if: steps.probe.outputs.available == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The SDK version comes from daml.yaml, so the installer and the project
+      # cannot disagree. Cached because it is a large download.
+      - name: read sdk-version from daml.yaml
+        if: steps.probe.outputs.available == 'true'
+        id: sdk
+        run: |
+          version="$(grep -E '^sdk-version:' daml.yaml | awk '{print $2}')"
+          if [ -z "$version" ]; then
+            echo "::error::daml.yaml has no sdk-version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: cache the sdk
+        if: steps.probe.outputs.available == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.daml
+          key: daml-sdk-${{ steps.sdk.outputs.version }}
+
+      - name: install the sdk
+        if: steps.probe.outputs.available == 'true'
+        run: |
+          if [ ! -x "$HOME/.daml/bin/daml" ]; then
+            curl -fsSL https://get.daml.com | sh -s "${{ steps.sdk.outputs.version }}"
+          fi
+          echo "$HOME/.daml/bin" >> "$GITHUB_PATH"
+
+      - name: daml build
+        if: steps.probe.outputs.available == 'true'
+        run: daml build
+
+      # Runs every Script in Test.Fund. The one that matters most is
+      # testSelectiveDisclosure: Bravo's queryContractId of Alpha's holding
+      # returns None, and so does Charlie's, while the issuer sees both because
+      # it signed both. That is the property Solidity cannot express, and it is
+      # the reason this platform is dual-ledger rather than a demonstration of
+      # two adapters over one interface.
+      #
+      # The module directory is Test/, capitalised, because a Daml module name
+      # has to match its path and test.Fund is not a legal module name.
+      - name: daml test
+        if: steps.probe.outputs.available == 'true'
+        run: daml test --all
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.probe.outputs.available == 'true'
+        with:
+          name: daml-dar
+          path: daml/.daml/dist/*.dar
+          retention-days: 30
+          if-no-files-found: ignore
+
+# ---------------------------------------------------------------------------
+# What this does not do
+# ---------------------------------------------------------------------------
+#
+# It runs the scripts on ONE participant node. Real Canton privacy is enforced
+# across participants by the domain's sub-transaction protocol; here it is
+# enforced by the ledger model alone, which is the same guarantee at the
+# template level and is not the same deployment. daml/README.md says so.
+#
+# It does not check the correspondence between these templates and
+# internal/ledger/canton.go. Neither is generated from the other; a divergence
+# is a bug in whichever one is wrong, and nothing enforces the correspondence
+# automatically. internal/ledger/canton_test.go asserts the same disclosure
+# property testSelectiveDisclosure asserts here, which is the whole mitigation.
+#
+# It does not exercise the bridge nonce guard, because there is not one on this
+# side: BridgeLock and BridgeUnlock carry the nonce so the relayer can read it
+# back, but nothing in Daml refuses a reused nonce the way BridgeVault.sol does.
+# daml/README.md names the fix — a BridgeNonce contract keyed on the nonce,
+# whose creation fails on a duplicate.
+#
+# FundShare and Pledge use key/maintainer, which is deprecated in Daml 3. A port
+# would replace them with an explicit index contract: more code, same semantics.
+# This workflow pins the SDK from daml.yaml, so that port is a deliberate change
+# rather than something a toolchain upgrade forces.

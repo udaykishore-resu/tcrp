@@ -1,0 +1,293 @@
+-- Copyright (c) 2026 the tcrp authors. Apache-2.0.
+--
+-- The Canton half of the platform's dual-ledger fund share.
+--
+-- The design decision this module exists to express is disclosure. A FundShare
+-- is signed by the issuer and observed by its holder, and nothing else. Two
+-- holders of the same fund cannot see each other's positions, cannot see each
+-- other's transfers, and cannot learn that the other exists. That is not a
+-- privacy feature layered on top of a shared ledger; it is what the ledger is.
+-- The same asset as an ERC-20 would publish every holding to everybody, which
+-- is why a regulated fund cannot use one and why this module is not simply the
+-- Solidity contract restated.
+--
+-- The second decision is propose-accept. On an ERC-20 the sender pushes tokens
+-- at an address and the recipient discovers it afterwards. Here a TransferProposal
+-- takes the units out of the sender's holding, shows the recipient exactly what
+-- it is being offered, and waits: nothing lands in a party's portfolio without
+-- that party having exercised a choice. For a security that is not a nicety —
+-- an unsolicited holding is a compliance problem for whoever receives it.
+--
+-- The Go simulator in internal/ledger/canton.go mirrors these templates and
+-- their disclosure rules. Neither is generated from the other.
+module Collateral.Fund where
+
+import DA.Optional (isSome)
+
+-- | A holding of a tokenised fund share.
+--
+-- Signatory the issuer, observer the holder. The holder is deliberately not a
+-- signatory: it cannot create a holding out of nothing, and every new holding
+-- comes into existence under the issuer's authority delegated through a choice
+-- on a contract the issuer already signed.
+--
+-- The key makes the holding unique per (issuer, symbol, owner), which is what
+-- forces balance changes to go through archive-and-recreate rather than being
+-- spread across a pile of fragments nobody can reconcile.
+template FundShare
+  with
+    issuer : Party
+    owner : Party
+    symbol : Text
+    quantity : Int
+  where
+    signatory issuer
+    observer owner
+
+    -- A holding of zero shares is not a holding; it is a contract that should
+    -- have been archived. Enforcing it here means no query has to filter for it.
+    ensure quantity > 0
+
+    key (issuer, symbol, owner) : (Party, Text, Party)
+    maintainer key._1
+
+    -- | Move shares directly. The controller is the owner; the authority to
+    -- create the recipient's holding comes from the issuer having signed this
+    -- contract. Use ProposeTransfer where the recipient must consent.
+    choice Transfer : (Optional (ContractId FundShare), ContractId FundShare)
+      with
+        recipient : Party
+        amount : Int
+      controller owner
+      do
+        assertMsg "FundShare: transfer amount must be positive" (amount > 0)
+        assertMsg "FundShare: insufficient holding" (amount <= quantity)
+        assertMsg "FundShare: recipient must differ from owner" (recipient /= owner)
+        remainder <- recreateRemainder issuer symbol owner (quantity - amount)
+        credited <- creditHolding issuer symbol recipient amount
+        pure (remainder, credited)
+
+    -- | Offer shares to a recipient, who may accept or decline. The units leave
+    -- the sender's holding now, so the same shares cannot be offered twice.
+    choice ProposeTransfer : (Optional (ContractId FundShare), ContractId TransferProposal)
+      with
+        recipient : Party
+        amount : Int
+      controller owner
+      do
+        assertMsg "FundShare: transfer amount must be positive" (amount > 0)
+        assertMsg "FundShare: insufficient holding" (amount <= quantity)
+        assertMsg "TransferProposal: recipient must differ from owner" (recipient /= owner)
+        remainder <- recreateRemainder issuer symbol owner (quantity - amount)
+        proposal <- create TransferProposal with
+          issuer = issuer
+          owner = owner
+          recipient = recipient
+          symbol = symbol
+          quantity = amount
+        pure (remainder, proposal)
+
+    -- | Encumber shares in favour of a pledgee, who becomes an observer of the
+    -- resulting contract. The collateral taker can see the collateral it holds
+    -- without acquiring any authority to move it: only Release is controlled by
+    -- the pledgee, and Release returns the shares to their owner.
+    choice PledgeShares : (Optional (ContractId FundShare), ContractId Pledge)
+      with
+        pledgee : Party
+        amount : Int
+        reference : Text
+      controller owner
+      do
+        assertMsg "Pledge: amount must be positive" (amount > 0)
+        assertMsg "Pledge: insufficient holding" (amount <= quantity)
+        assertMsg "Pledge: pledgee must differ from owner" (pledgee /= owner)
+        existing <- lookupByKey @Pledge (issuer, symbol, owner, pledgee)
+        assertMsg "Pledge: this pledge already exists" (not (isSome existing))
+        remainder <- recreateRemainder issuer symbol owner (quantity - amount)
+        pledge <- create Pledge with
+          issuer = issuer
+          owner = owner
+          pledgee = pledgee
+          symbol = symbol
+          quantity = amount
+          reference = reference
+        pure (remainder, pledge)
+
+    -- | Retire shares. Controlled by the issuer, because a redemption
+    -- extinguishes the issuer's own obligation.
+    choice Redeem : Optional (ContractId FundShare)
+      with
+        amount : Int
+      controller issuer
+      do
+        assertMsg "FundShare: redemption amount must be positive" (amount > 0)
+        assertMsg "FundShare: insufficient holding" (amount <= quantity)
+        recreateRemainder issuer symbol owner (quantity - amount)
+
+    -- | Move shares into the bridge vault party against a mint on the EVM
+    -- network. Controlled by the issuer, who operates the bridge.
+    --
+    -- The nonce is the cross-network replay key. It is recorded on the vault's
+    -- holding so that the relayer can read it back, exactly as the EVM side
+    -- carries it in the lock event: replay protection keyed on a transaction
+    -- identifier would not survive that identifier changing.
+    choice BridgeLock : (Optional (ContractId FundShare), ContractId FundShare)
+      with
+        vault : Party
+        amount : Int
+        nonce : Int
+      controller issuer
+      do
+        assertMsg "BridgeVault: lock amount must be positive" (amount > 0)
+        assertMsg "BridgeVault: insufficient holding" (amount <= quantity)
+        assertMsg "BridgeVault: nonce must be positive" (nonce > 0)
+        remainder <- recreateRemainder issuer symbol owner (quantity - amount)
+        locked <- creditHolding issuer symbol vault amount
+        pure (remainder, locked)
+
+-- | The first half of the propose-accept pair.
+--
+-- Signatory the issuer, observed by both sides. The recipient can see what it
+-- is being offered; a third party cannot see that the offer exists.
+template TransferProposal
+  with
+    issuer : Party
+    owner : Party
+    recipient : Party
+    symbol : Text
+    quantity : Int
+  where
+    signatory issuer
+    observer owner, recipient
+
+    ensure quantity > 0 && owner /= recipient
+
+    -- | The recipient takes the shares.
+    choice Accept : ContractId FundShare
+      controller recipient
+      do creditHolding issuer symbol recipient quantity
+
+    -- | The recipient declines. The shares go back to the sender.
+    choice Reject : ContractId FundShare
+      controller recipient
+      do creditHolding issuer symbol owner quantity
+
+    -- | The sender withdraws the offer before it is answered.
+    choice Withdraw : ContractId FundShare
+      controller owner
+      do creditHolding issuer symbol owner quantity
+
+-- | Shares encumbered in favour of a pledgee.
+--
+-- The pledgee is an observer, not a signatory and not the owner: it can see the
+-- collateral, and that is the whole of its right on the ledger. Everything else
+-- about the pledge — what it secures, what happens on a default — lives in the
+-- agreement the reference points at, which is where it belongs.
+template Pledge
+  with
+    issuer : Party
+    owner : Party
+    pledgee : Party
+    symbol : Text
+    quantity : Int
+    reference : Text
+  where
+    signatory issuer
+    observer owner, pledgee
+
+    ensure quantity > 0 && owner /= pledgee
+
+    key (issuer, symbol, owner, pledgee) : (Party, Text, Party, Party)
+    maintainer key._1
+
+    -- | Return the collateral. Controlled by the pledgee: collateral is
+    -- released by the taker, not taken back by the giver.
+    choice Release : ContractId FundShare
+      controller pledgee
+      do creditHolding issuer symbol owner quantity
+
+    -- | Enforce the pledge on a default. Controlled by both parties, because a
+    -- unilateral seizure is a dispute rather than a settlement — the agreement
+    -- decides whether the default happened, and both parties record that it did.
+    choice Enforce : ContractId FundShare
+      controller pledgee, owner
+      do creditHolding issuer symbol pledgee quantity
+
+-- | The issuer's standing authority to issue a symbol.
+--
+-- It exists so that issuance is a choice on a contract rather than a bare
+-- create: the transaction tree then shows which authority a new holding was
+-- created under, which is what an auditor asks for first.
+template FundIssuance
+  with
+    issuer : Party
+    symbol : Text
+    name : Text
+  where
+    signatory issuer
+
+    key (issuer, symbol) : (Party, Text)
+    maintainer key._1
+
+    -- | Issue shares to a holder.
+    nonconsuming choice Issue : ContractId FundShare
+      with
+        holder : Party
+        amount : Int
+      controller issuer
+      do
+        assertMsg "FundIssuance: issue amount must be positive" (amount > 0)
+        creditHolding issuer symbol holder amount
+
+    -- | Return shares from the bridge vault to a holder after a burn on the
+    -- other network.
+    nonconsuming choice BridgeUnlock : (Optional (ContractId FundShare), ContractId FundShare)
+      with
+        vault : Party
+        holder : Party
+        amount : Int
+        nonce : Int
+      controller issuer
+      do
+        assertMsg "BridgeVault: unlock amount must be positive" (amount > 0)
+        assertMsg "BridgeVault: nonce must be positive" (nonce > 0)
+        (vaultCid, vaultHolding) <- fetchByKey @FundShare (issuer, symbol, vault)
+        assertMsg "BridgeVault: insufficient locked balance" (amount <= vaultHolding.quantity)
+        archive vaultCid
+        remainder <- recreateRemainder issuer symbol vault (vaultHolding.quantity - amount)
+        released <- creditHolding issuer symbol holder amount
+        pure (remainder, released)
+
+-- | Add shares to a party's holding, archiving and recreating it.
+--
+-- This is the Daml idiom and it is not an implementation detail: there is no
+-- cell to increment, so every balance change leaves an archive and a create in
+-- the transaction tree, and the history of a holding is the ledger rather than
+-- a log somebody kept alongside it.
+creditHolding : Party -> Text -> Party -> Int -> Update (ContractId FundShare)
+creditHolding issuer symbol owner amount = do
+  existing <- lookupByKey @FundShare (issuer, symbol, owner)
+  case existing of
+    None -> create FundShare with issuer = issuer, owner = owner, symbol = symbol, quantity = amount
+    Some cid -> do
+      holding <- fetch cid
+      archive cid
+      create FundShare with
+        issuer = issuer
+        owner = owner
+        symbol = symbol
+        quantity = holding.quantity + amount
+
+-- | Recreate what is left of a holding after part of it has been moved. A
+-- remainder of zero creates nothing, which is why the ensure clause on
+-- FundShare can insist on a positive quantity.
+--
+-- The caller has already consumed the original holding, either because the
+-- choice was consuming or by archiving it explicitly.
+recreateRemainder : Party -> Text -> Party -> Int -> Update (Optional (ContractId FundShare))
+recreateRemainder issuer symbol owner remaining =
+  if remaining > 0
+    then do
+      cid <- create FundShare with issuer = issuer, owner = owner, symbol = symbol, quantity = remaining
+      pure (Some cid)
+    else pure None

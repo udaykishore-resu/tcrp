@@ -1,0 +1,76 @@
+# The policy bundle, and the platform's non-secret configuration.
+#
+# The DEFAULT bundle is embedded in the binary with go:embed and ships inside
+# the image — policy.MustDefault panics if it does not compile, because a binary
+# that cannot compile its own policy must not start. This ConfigMap is an
+# OVERRIDE, mounted read-only at /etc/tcrp/policy and selected with --policy.
+#
+# IMPORTANT, and it is in docs/threat-model.md section 6 as the most significant
+# gap in the document: the bundle is DIGESTED BUT NOT SIGNED. Bundle.Digest() is
+# recorded on every decision and in every evidence bundle, so a change is visible
+# in the audit stream — but policy.LoadBundleFile will load any file it is given.
+# Anyone who can edit this ConfigMap can install rules of their choosing.
+#
+# Until signature verification exists at load, treat write access to this
+# ConfigMap as equivalent to write access to the platform's authorization logic,
+# and restrict it accordingly:
+#
+#   - RBAC: no application role gets update on configmaps in this namespace.
+#   - Changes go through the same review as a code change.
+#   - The digest in the audit stream is the detection mechanism, and detection
+#     requires somebody to look.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tcrp-policy
+  namespace: tcrp
+  labels:
+    app.kubernetes.io/name: tcrp
+    app.kubernetes.io/component: policy
+  annotations:
+    # Bump on every change so the Deployment's checksum annotation changes and
+    # the rollout actually happens — a mounted ConfigMap updates in place
+    # without restarting the pod, which for a policy bundle means the running
+    # process keeps the old rules until something else restarts it.
+    tcrp.io/bundle-version: "2026.09.1"
+data:
+  collateral-ops.json: |
+    {
+      "package": "tcrp.collateral",
+      "version": "2026.09.1",
+      "description": "Placeholder. Replace with the contents of internal/policy/bundles/collateral-ops.json, or delete this ConfigMap and let the embedded bundle be used. Sixteen rules: twelve deny, four allow, deny-overrides, default_effect deny.",
+      "default_effect": "deny",
+      "rules": []
+    }
+---
+# Non-secret configuration.
+#
+# THIS CONFIGMAP IS GONE, AND THE ENVFROM THAT CONSUMED IT WITH IT.
+#
+# It used to carry TCRP_ADDR, TCRP_DIR, TCRP_ENVIRONMENT, TCRP_GUARD_URL,
+# TCRP_POLICY, TCRP_MODEL and TCRP_TRACE_FILE. No Go file in this repository
+# reads any of them. tcrpd is configured by its flag set, and a ConfigMap of
+# names nothing reads is worse than no ConfigMap: it looks like the place to
+# change the environment, and changing it does nothing at all.
+#
+# The equivalents are flags on the platform container in deployment.yaml:
+#
+#   TCRP_ADDR         --addr=:8080
+#   TCRP_DIR          --dir=/var/lib/tcrp
+#   TCRP_ENVIRONMENT  --env=production      (a policy input; deny-experimental-
+#                                            tools-in-production reads it, so the
+#                                            string is load-bearing)
+#   TCRP_POLICY       --policy=/etc/tcrp/policy/collateral-ops.json
+#   TCRP_GUARD_URL    --guard-url=...       (commented out; nothing serves it)
+#   TCRP_MODEL        --model=planner
+#   TCRP_TRACE_FILE   --trace-file=/var/log/tcrp/spans.jsonl
+#
+# The three environment variables that ARE read are ANTHROPIC_API_KEY and
+# TCRP_MODEL_ID (internal/agent/anthropic.go) and TCRP_JUDGE_MODEL
+# (internal/eval/judge.go). All three matter only under --model=anthropic.
+#
+# There is no TCRP_DETERMINISTIC either; determinism is platform.Options and is
+# set by `ask` and `conform`, never by `serve`. It pins the clock to the seed
+# instant, which among other things degrades the API rate limiter to a fixed
+# budget per principal rather than a rate — the token bucket refills from the
+# platform clock and a pinned clock never refills it.

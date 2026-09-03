@@ -1,0 +1,337 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tcrp-platform
+  namespace: tcrp
+  labels:
+    app.kubernetes.io/name: tcrp
+    app.kubernetes.io/component: platform
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tcrp
+      app.kubernetes.io/component: platform
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tcrp
+        app.kubernetes.io/component: platform
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+        # A mounted ConfigMap updates in place WITHOUT restarting the pod. For a
+        # policy bundle that means the running process keeps the old rules until
+        # something else happens to restart it, which is exactly the wrong
+        # behaviour for an authorization change. This checksum must be
+        # regenerated on every bundle change so the rollout actually occurs.
+        #   kubectl create cm tcrp-policy --dry-run=client -o yaml \
+        #     --from-file=internal/policy/bundles/collateral-ops.json | sha256sum
+        checksum/policy: "REPLACE_ON_EVERY_BUNDLE_CHANGE"
+    spec:
+      serviceAccountName: tcrp
+      automountServiceAccountToken: false
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Spread across nodes and zones. Not for load — three replicas of a
+      # process this size do not need it — but so that a node drain cannot take
+      # the approval surface with it while a gate is open. An approver whose
+      # request 502s at the moment they click approve is an approval that has to
+      # be repeated, and repeated approvals are how approval fatigue starts.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: tcrp
+              app.kubernetes.io/component: platform
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: tcrp
+              app.kubernetes.io/component: platform
+
+      # SIGTERM, then time to finish an in-flight run. A run that is mid-tool-call
+      # when the process dies is recoverable — the store has it and Resume picks
+      # it up — but a run that is mid-AUDIT-WRITE is a chain with a partial final
+      # record, which audit.Verify reports as a break at the last sequence. That
+      # is the failure this grace period exists to avoid.
+      terminationGracePeriodSeconds: 45
+
+      containers:
+        - name: platform
+          image: tcrp:0.0.0-dev
+          imagePullPolicy: IfNotPresent
+
+          # Flags, not environment variables. tcrpd reads its configuration from
+          # its flag set; the only environment variables any code in this
+          # repository reads are ANTHROPIC_API_KEY and TCRP_MODEL_ID
+          # (internal/agent/anthropic.go) and TCRP_JUDGE_MODEL
+          # (internal/eval/judge.go), all three only under --model=anthropic.
+          # An envFrom of TCRP_ADDR/TCRP_DIR/TCRP_ENVIRONMENT would be read by
+          # nothing and would silently do nothing.
+          #
+          # --dev-auth=false is not optional here: `serve` refuses to start with
+          # --env=production and dev auth on. Read what that leaves you with in
+          # deploy/README.md — the answer is not "production authentication".
+          args:
+            - serve
+            - --addr=:8080
+            - --dir=/var/lib/tcrp
+            - --env=production
+            - --dev-auth=false
+            - --policy=/etc/tcrp/policy/collateral-ops.json
+            - --model=planner
+            - --log=info
+            - --trace-file=/var/log/tcrp/spans.jsonl
+            # The guardrail as a separate service. Commented out because nothing
+            # serves it yet — see the tcrp-guard Deployment below. Uncomment
+            # together with that Deployment's replicas.
+            # - --guard-url=http://tcrp-guard.tcrp.svc.cluster.local:8081
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          env:
+            # Read only under --model=anthropic, which is not the mode above.
+            # Present so that switching the model is one flag and one secret.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tcrp-secrets
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+
+          # Liveness asserts the process can serve. It checks NOTHING ELSE, on
+          # purpose: a liveness probe that fails on a dependency restarts the pod
+          # for something a restart cannot fix, and restarting a platform whose
+          # database is down produces a crash loop that hides the real fault.
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # Readiness is a stronger claim and is checked rather than asserted:
+          # the policy bundle must be installed and the curated snapshot must be
+          # buildable. A process that is running but cannot render a decision
+          # should not be sent traffic.
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+            successThreshold: 1
+
+          # Building the lake from the seed and compiling the policy happens at
+          # construction. A startup probe gives it room without making the
+          # liveness probe's failureThreshold generous for the whole pod
+          # lifetime.
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 3
+            failureThreshold: 30
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              # No CPU limit, deliberately. CFS throttling on a latency-sensitive
+              # request path turns a p50 of milliseconds into a p99 of hundreds
+              # of milliseconds, and the guardrail has a 100ms budget beyond
+              # which read-only turns fail OPEN. A throttled pod would silently
+              # lose guardrail coverage. Use the request plus the HPA to manage
+              # capacity.
+              memory: "1Gi"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/tcrp
+            - name: policy
+              mountPath: /etc/tcrp/policy
+              readOnly: true
+            - name: logs
+              mountPath: /var/log/tcrp
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        # NOTE: emptyDir is wrong for the state directory and is here because
+        # this manifest has to be applicable as it stands. platform.Options.Dir
+        # holds the lake tables, the run and approval JSON, and the audit log —
+        # all three of which must survive a restart. A run paused on an approval
+        # gate is precisely the state that must outlive the process (ADR 0010),
+        # and with emptyDir it does not.
+        #
+        # Replace with a StatefulSet and a PVC per replica, or move the store to
+        # Postgres (migrations/) and the audit log with it. The second is the
+        # right answer: it also makes "which runs are waiting on me" answerable
+        # by a replica that started none of them.
+        - name: state
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: policy
+          configMap:
+            name: tcrp-policy
+        - name: logs
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+---
+# THE STANDALONE GUARDRAIL — replicas: 0, AND IT MUST STAY THERE FOR NOW.
+#
+# guard.Handler (internal/guard/service.go) serves POST /v1/inspect,
+# GET /v1/healthz and GET /v1/config, and guard.Client speaks to it; the
+# platform picks between that and the in-process engine with
+# `serve --guard-url`, which is wiring and not a code change. See
+# docs/adr/0003-guardrail-transport-and-fail-modes.md.
+#
+# What does not exist is a binary that serves guard.Handler. tcrpd's subcommands
+# are demo, serve, ask, eval, conform and version — there is no `guard` — and
+# there is no cmd/guardd. `args: ["guard", ...]` below would exit 2 on every
+# start and CrashLoopBackOff.
+#
+# It is left here at zero replicas rather than deleted because service.yaml,
+# pdb.yaml, hpa.yaml and networkpolicy.yaml all describe this workload and are
+# correct about it. When the binary lands: set replicas, fix the args to match
+# whatever it is actually called, and uncomment --guard-url on the platform.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tcrp-guard
+  namespace: tcrp
+  labels:
+    app.kubernetes.io/name: tcrp
+    app.kubernetes.io/component: guard
+spec:
+  # More replicas than the platform. The guardrail is on the request path of
+  # every turn on all three surfaces, it is stateless, and when its 100ms budget
+  # is exhausted read-only turns fail open while state-change and money-movement
+  # turns fail closed — so capacity here is directly control coverage and
+  # directly availability. See docs/adr/0003-guardrail-transport-and-fail-modes.md.
+  #
+  # Four is the number to use once there is a binary to run. Zero is the number
+  # today, for the reason in the block above this Deployment.
+  replicas: 0
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tcrp
+      app.kubernetes.io/component: guard
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tcrp
+        app.kubernetes.io/component: guard
+      annotations:
+        # No prometheus.io/scrape. guard.Handler serves /v1/inspect,
+        # /v1/healthz and /v1/config and nothing else — there is no /metrics on
+        # this port, and an annotation pointing at one would give Prometheus a
+        # target that 404s. The tcrp_guard_* series in prometheusrule.yaml are
+        # registered in the platform's registry and are scraped from the
+        # platform's /metrics, whichever transport the inspection took.
+        tcrp.io/notice: "no binary serves this workload yet; replicas is 0"
+    spec:
+      serviceAccountName: tcrp-guard
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: tcrp
+              app.kubernetes.io/component: guard
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: guard
+          image: tcrp:0.0.0-dev
+          imagePullPolicy: IfNotPresent
+          # No such subcommand. See the block above the Deployment.
+          args: ["guard", "--addr", ":8081"]
+          ports:
+            - name: http
+              containerPort: 8081
+              protocol: TCP
+          # No env. The identity signer's HMAC secret is the compile-time
+          # literal "tcrp-dev-signing-key" (internal/platform/platform.go);
+          # nothing reads TCRP_SIGNING_SECRET. When the guardrail binary lands it
+          # will need the same secret the platform uses, and both sides will need
+          # to read it from somewhere first.
+          livenessProbe:
+            httpGet: {path: /v1/healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: {path: /v1/healthz, port: http}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "128Mi"
+            limits:
+              # No CPU limit, for the same reason as the platform and more
+              # sharply: throttling this pod is how the budget gets exceeded, and
+              # exceeding the budget is how read-only turns start going out
+              # uninspected.
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

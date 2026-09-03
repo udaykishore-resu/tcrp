@@ -1,0 +1,420 @@
+# CI for the Go platform.
+#
+# The repository has no third-party dependencies — go.mod has no require block —
+# so there is nothing to download, nothing to vendor and no module cache to
+# warm. Every job below runs from a clean checkout with a Go toolchain and
+# nothing else. That is the property worth protecting and the `no-dependencies`
+# job fails the build if it is ever lost. See docs/adr/0001-standard-library-only.md.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+
+  # -------------------------------------------------------------------------
+  # Build, vet, gofmt.
+  # -------------------------------------------------------------------------
+  build:
+    name: build · vet · gofmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: go build
+        run: go build ./...
+
+      # The binary specifically, with the ldflags the image uses, so a broken
+      # -X target is caught here rather than in deploy/Dockerfile.
+      - name: build tcrpd
+        run: |
+          go build -trimpath \
+            -ldflags="-X main.version=ci -X main.commit=${GITHUB_SHA} -X main.builtAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o /tmp/tcrpd ./cmd/tcrpd
+          /tmp/tcrpd version
+
+      # `demo` builds the whole object graph, runs thirteen acts through it and
+      # evaluates every invariant at the end. It is the cheapest end-to-end
+      # smoke test in the repository and it exits non-zero if any of that fails.
+      # Output goes to the step summary because the acts are the readable
+      # account of what the platform did on this commit.
+      - name: tcrpd demo
+        run: |
+          /tmp/tcrpd demo | tee demo.txt
+          {
+            echo '## tcrpd demo'
+            echo
+            echo '```'
+            cat demo.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: go vet
+        run: go vet ./...
+
+      # gofmt -l prints the files that need formatting and exits 0 either way,
+      # so the exit code has to be constructed. Print the diff too: "gofmt found
+      # a problem" is useless without saying what.
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            echo
+            gofmt -d .
+            exit 1
+          fi
+
+      # A stray `go get` in a commit is the failure mode this guards against,
+      # and it is worth failing loudly rather than discovering it at the next
+      # offline build.
+      - name: no dependencies
+        run: |
+          if grep -qE '^\s*require' go.mod; then
+            echo "go.mod has a require block. This repository depends on the"
+            echo "standard library only — see docs/adr/0001-standard-library-only.md."
+            cat go.mod
+            exit 1
+          fi
+          if [ -f go.sum ]; then
+            echo "go.sum exists, which means a dependency was added."
+            exit 1
+          fi
+          if [ -d vendor ]; then
+            echo "vendor/ exists."
+            exit 1
+          fi
+
+  # -------------------------------------------------------------------------
+  # The test suite, under the race detector.
+  # -------------------------------------------------------------------------
+  test:
+    name: go test -race
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      # -count=1 defeats the test cache. A cached pass is not a pass on this
+      # commit.
+      - name: go test -race
+        run: go test ./... -count=1 -race -timeout 10m
+
+      # -coverpkg=./... is the meaningful measurement here and the default is
+      # not. Without it, a package is credited only for its own tests, and four
+      # packages in internal/ have none of their own — guard, tools, agent, api
+      # — while being exercised heavily by internal/platform/smoke_test.go, by
+      # internal/eval and by the conformance invariants. The default profile
+      # reports those as 0.0% and hides real coverage; -coverpkg attributes it.
+      - name: coverage
+        run: |
+          go test ./... -count=1 -coverpkg=./... -coverprofile=coverage.out -covermode=atomic
+          go tool cover -func=coverage.out | tail -1
+
+      # Reported, not gated. Module-wide statement coverage under -coverpkg is
+      # 72.3%, and the distribution is uneven in a documented way: cmd/tcrpd is
+      # 0.0% (no test files), internal/api 0.0% and internal/tools 41.2%.
+      # docs/phases/04-governed-agent.md states that plainly. A threshold here
+      # would either be set low enough to be meaningless or would fail on a
+      # known and documented gap.
+      #
+      # The figure moved from 74.4% to 72.3% when cmd/tcrpd landed: the package
+      # has no tests of its own and -coverpkg=./... counts it. What the
+      # subcommands do IS covered — by internal/platform's smoke test, by the
+      # conformance job and by the eval job — but not through this package's
+      # statements.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 14
+
+  # -------------------------------------------------------------------------
+  # Determinism.
+  # -------------------------------------------------------------------------
+  # The platform's central claim about its figures is that identical input
+  # produces byte-identical output. Running the determinism tests repeatedly is
+  # how a map-iteration order or a worker-pool ordering bug surfaces — those
+  # fail intermittently by construction, so a single run does not catch them.
+  determinism:
+    name: determinism
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: risk engine determinism, 20 runs
+        run: go test ./internal/risk/ -run 'TestDeterminism' -count=20 -race
+
+      - name: conformance bundle determinism, 20 runs
+        run: go test ./internal/conform/ -run 'Deterministic' -count=20 -race
+
+      - name: end-to-end smoke, 5 runs
+        run: go test ./internal/platform/ -run TestSmokeRun -count=5 -race
+
+  # -------------------------------------------------------------------------
+  # The conformance gate.
+  # -------------------------------------------------------------------------
+  # `tcrpd conform` assembles a platform, drives a representative workload
+  # through it, collects evidence from the audit log, the spans, both ledgers,
+  # the bridge and the lake, evaluates the invariants the BPMN model declares,
+  # and exits non-zero when Report.Gate does. See
+  # docs/adr/0009-conformance-as-a-ci-gate.md.
+  #
+  # The package's own tests still run first. They cover the MECHANISM — the
+  # parser, the approval-dominance check, all thirteen invariants against
+  # constructed evidence, the gate's asymmetry, the bundle's tamper-evidence —
+  # against inputs a real run would never produce, including failing ones. The
+  # gate below covers the mechanism running against a real platform's evidence.
+  # Neither subsumes the other.
+  conformance:
+    name: conformance gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      # The BPMN models must parse and validate. Process.Validate fails the
+      # build when a model declares an invariant nothing implements, and proves
+      # by graph dominance that every @tier money_movement element is preceded
+      # by an approval gate on every path from a start event.
+      - name: BPMN models parse and validate
+        run: go test ./internal/conform/ -run 'Parse|Validate|Reachability' -count=1 -v
+
+      - name: invariants and gate
+        run: go test ./internal/conform/... -count=1 -race
+
+      # The gate itself.
+      #
+      # --gate is what makes the exit code meaningful: without it the report is
+      # printed and the command still exits 0. --exercise defaults to true and
+      # is what puts evidence in the audit log for the invariants to read; an
+      # empty log makes every invariant inconclusive, and inconclusive fails
+      # this gate on purpose — the cheapest way to turn a red build green is to
+      # stop collecting the evidence.
+      #
+      # One --process. The flag is singular and takes the last value given, so
+      # a second model needs a second invocation, not a repeated flag. The
+      # margin-call model is the one that declares the AGENT invariants; the
+      # bridge model is checked in the step after.
+      - name: conformance gate — collateral margin call
+        run: |
+          go run ./cmd/tcrpd conform \
+            --process bpmn/collateral-margin-call.bpmn \
+            --gate \
+            --bundle evidence.json
+
+      - name: conformance gate — bridge lock and mint
+        run: |
+          go run ./cmd/tcrpd conform \
+            --process bpmn/bridge-lock-and-mint.bpmn \
+            --gate \
+            --bundle evidence-bridge.json
+
+      # The bundle is the artefact an auditor asks for: the report, the
+      # evidence it cites, and an ed25519 signature over both. The signing key
+      # is generated per invocation and discarded, so the signature proves the
+      # bundle has not been edited since it was written and proves nothing about
+      # who wrote it. Ninety days because that is the window in which somebody
+      # asks "what did the gate say on the commit that shipped".
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-bundle
+          path: |
+            evidence.json
+            evidence-bridge.json
+          retention-days: 90
+          if-no-files-found: warn
+
+  # -------------------------------------------------------------------------
+  # The evaluation suite — a report, not a gate.
+  # -------------------------------------------------------------------------
+  # Non-blocking on purpose. The suite scores the platform's behaviour across 34
+  # scenarios; the hard controls it checks (a forbidden tool that executed, a
+  # policy violation, a money movement with no approval) are ALSO conformance
+  # invariants, and those DO block in the job above. Running the same claim as
+  # both a gate and a score would mean tuning the score to keep the build green.
+  #
+  # continue-on-error rather than `if: always()` on a later step, so the job's
+  # own conclusion is visible without failing the workflow.
+  eval:
+    name: eval suite (report)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      # The harness's own tests: scoring, the offline judge, drift statistics,
+      # scenario validation, per-scenario isolation, panic recovery.
+      - name: eval harness
+        run: go test ./internal/eval/... -count=1 -race -v
+
+      # The suite itself, against the real runtime.
+      #
+      # --strict=false is the whole reason this is a report. The flag DEFAULTS
+      # TO TRUE and `tcrpd eval` then exits 1 on any failing scenario, which
+      # would make this a gate by accident. Scenarios do fail today — see the
+      # step summary — and the reasons are scoring gaps, not control failures;
+      # the controls are gated in the conformance job. Leave this false and read
+      # the artefact.
+      #
+      # No --suite: the built-in suite is embedded with go:embed
+      # (internal/eval/scenario.go) and is what runs by default. Passing
+      # --suite internal/eval/suite.json loads the same file from disk.
+      #
+      # The default judge is RubricJudge, which runs offline and needs no API
+      # key. Its verdicts and scores are identical run to run; the JSON report
+      # is not byte-identical, because it carries a timestamp, per-run ids and
+      # wall-clock durations. Do not wire an LLM judge into CI: a
+      # non-deterministic score cannot be compared across runs, which is the
+      # whole reason the default judge is the dumb one.
+      - name: run the suite
+        run: |
+          go run ./cmd/tcrpd eval \
+            --strict=false \
+            --out eval-report.json \
+            --markdown eval-report.md
+          cat eval-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: |
+            eval-report.json
+            eval-report.md
+          retention-days: 30
+          if-no-files-found: warn
+
+  # -------------------------------------------------------------------------
+  # Vulnerability scan — skipped when offline.
+  # -------------------------------------------------------------------------
+  # govulncheck needs the vulnerability database, which needs the network. Every
+  # other job in this workflow runs offline, and the point of this job is to be
+  # the one exception rather than to quietly make the whole pipeline
+  # network-dependent.
+  #
+  # With no third-party dependencies the report is short by construction: it can
+  # only ever find a vulnerability in the Go standard library or the toolchain.
+  # That is still worth knowing — several standard-library CVEs a year are
+  # relevant to a process that parses untrusted JSON and serves HTTP.
+  govulncheck:
+    name: govulncheck (skipped offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      # Probe before installing. `go install` against a proxy that is not
+      # reachable fails with a module error that reads like a dependency
+      # problem, which in a repository whose defining property is having no
+      # dependencies is a confusing way to fail.
+      - name: is the network reachable
+        id: net
+        run: |
+          if curl -fsS --max-time 10 -o /dev/null https://vuln.go.dev/index/db.json; then
+            echo "online=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "online=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::vuln.go.dev unreachable; skipping govulncheck. Every other job in this workflow runs offline by design."
+          fi
+
+      - name: install govulncheck
+        if: steps.net.outputs.online == 'true'
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      # -show verbose because with no dependencies the interesting output is
+      # which standard-library symbols are actually reachable, not merely which
+      # advisories exist.
+      - name: govulncheck
+        if: steps.net.outputs.online == 'true'
+        run: govulncheck -show verbose ./...
+
+  # -------------------------------------------------------------------------
+  # Benchmarks — informational.
+  # -------------------------------------------------------------------------
+  # Not gated. A benchmark threshold on a shared GitHub runner produces flaky
+  # failures and teaches people to re-run the build, which is worse than having
+  # no threshold. The numbers in docs/slo.md were measured on a known machine
+  # and are stated with that machine named.
+  bench:
+    name: benchmarks (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: risk engine
+        run: |
+          go test ./internal/risk/... -run XXX -bench . -benchtime 200ms -count=3 \
+            | tee bench.txt
+          {
+            echo '## Risk engine benchmarks'
+            echo
+            echo '```'
+            cat bench.txt
+            echo '```'
+            echo
+            echo 'Informational. Runner hardware varies; docs/slo.md carries the'
+            echo 'reference numbers with the machine named.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmarks
+          path: bench.txt
+          retention-days: 30

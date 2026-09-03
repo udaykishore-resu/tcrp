@@ -1,0 +1,86 @@
+# PodDisruptionBudgets.
+#
+# These govern VOLUNTARY disruption only — a node drain, a cluster upgrade, a
+# `kubectl drain`. They do nothing for a node that fails, and nothing for an
+# eviction the kubelet performs under memory pressure. The protection they give
+# is against the routine operation that is most likely to interrupt an approval
+# gate at the wrong moment.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tcrp-platform
+  namespace: tcrp
+  labels:
+    app.kubernetes.io/name: tcrp
+    app.kubernetes.io/component: platform
+spec:
+  # minAvailable rather than maxUnavailable, and a number rather than a
+  # percentage.
+  #
+  # A percentage interacts badly with the HPA: at minReplicas 3 a
+  # maxUnavailable of 33% permits one eviction, and at 12 replicas it permits
+  # four simultaneously. The disruption that matters is not proportional to the
+  # replica count — it is "is there still a replica able to accept an approval
+  # grant" — so the floor is absolute.
+  #
+  # Two, not one. With minAvailable: 1 a drain can take the cluster down to a
+  # single replica, and that replica is then a single point of failure for
+  # every open approval gate for the duration of the drain.
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tcrp
+      app.kubernetes.io/component: platform
+  # Pods that are Unhealthy (failing readiness) may be evicted even when that
+  # would breach the budget. Without this, a rollout that produces unready pods
+  # deadlocks the drain: the budget counts them as protected and nothing can be
+  # evicted to fix them.
+  unhealthyPodEvictionPolicy: AlwaysAllow
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tcrp-guard
+  namespace: tcrp
+  labels:
+    app.kubernetes.io/name: tcrp
+    app.kubernetes.io/component: guard
+spec:
+  # Three of four minimum.
+  #
+  # The guardrail is stateless, so losing a replica costs no work. What it costs
+  # is capacity, and capacity here is control coverage: when the 100ms budget is
+  # exhausted, read-only turns fail OPEN and go out uninspected while
+  # state-change and money-movement turns fail CLOSED and are blocked. A drain
+  # that halves guardrail capacity during a busy period does not degrade
+  # gracefully — it changes what the platform enforces.
+  #
+  # This is the manifest where the asymmetric fail mode in ADR 0003 has an
+  # operational consequence, and it is why the guardrail's budget is tighter
+  # than the platform's despite the guardrail being the more disposable of the
+  # two.
+  minAvailable: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tcrp
+      app.kubernetes.io/component: guard
+  unhealthyPodEvictionPolicy: AlwaysAllow
+
+# ---------------------------------------------------------------------------
+# Operating note
+# ---------------------------------------------------------------------------
+#
+# Before a planned drain of a node running platform replicas, check for open
+# approval gates:
+#
+#   kubectl -n tcrp exec deploy/tcrp-platform -- \
+#     wget -qO- localhost:8080/v1/approvals
+#
+# (There is no shell in the image, so that exec will not work as written — see
+# deploy/README.md. Query through the Service instead.)
+#
+# An open gate is not a reason to block a drain. Approvals are persisted objects
+# and a run resumes on any replica (ADR 0010), so the correct behaviour is
+# preserved. It is a reason to know: an approver whose grant request lands on a
+# terminating pod sees an error at the moment they click approve, and a repeated
+# approval is how approval fatigue starts.

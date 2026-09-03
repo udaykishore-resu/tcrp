@@ -1,0 +1,1177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TCRP Governance Console</title>
+<style>
+/* ---------------------------------------------------------------------------
+   Palette. Two themes, one set of names. Every colour is defined once on :root
+   and redefined under prefers-color-scheme, so no rule below has to know which
+   theme it is painting.
+   --------------------------------------------------------------------------- */
+:root {
+  color-scheme: light dark;
+  --bg:        #f4f4f2;
+  --panel:     #ffffff;
+  --panel-alt: #fafafa;
+  --ink:       #16181d;
+  --ink-soft:  #454b56;
+  --muted:     #6b7280;
+  --line:      #d9dce1;
+  --line-soft: #e8eaee;
+  --accent:    #1d4e79;
+  --accent-in: #ffffff;
+  --ok:        #1c6b46;
+  --warn:      #8a5a00;
+  --bad:       #98221f;
+  --info:      #23527c;
+  --ok-bg:     #e6f2ec;
+  --warn-bg:   #faf1de;
+  --bad-bg:    #f7e6e5;
+  --info-bg:   #e6eef6;
+  --neutral-bg:#eceef1;
+  --shadow:    0 1px 2px rgba(16,18,22,.06);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #0e1013;
+    --panel:     #16191e;
+    --panel-alt: #1b1f25;
+    --ink:       #e7e9ec;
+    --ink-soft:  #c2c7cf;
+    --muted:     #8b929d;
+    --line:      #282d35;
+    --line-soft: #21252b;
+    --accent:    #7fb2e0;
+    --accent-in: #0e1013;
+    --ok:        #6fc79b;
+    --warn:      #dcae5c;
+    --bad:       #e58a86;
+    --info:      #8ab6de;
+    --ok-bg:     #13291f;
+    --warn-bg:   #2b2312;
+    --bad-bg:    #2c1817;
+    --info-bg:   #14212c;
+    --neutral-bg:#1e232a;
+    --shadow:    none;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 14px/1.45 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); }
+
+/* --------------------------------------------------------------------------- */
+/* Chrome                                                                       */
+/* --------------------------------------------------------------------------- */
+header.top {
+  position: sticky; top: 0; z-index: 20;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 10px 20px 0;
+}
+.brandrow {
+  display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+  padding-bottom: 10px;
+}
+.brand { font-size: 15px; font-weight: 650; letter-spacing: .01em; }
+.brand span { color: var(--muted); font-weight: 400; }
+.buildline {
+  margin-left: auto; display: flex; gap: 14px; align-items: center;
+  font-size: 12px; color: var(--muted); font-family: var(--mono); flex-wrap: wrap;
+}
+.buildline b { font-weight: 500; color: var(--ink-soft); }
+
+.idbox { display: flex; align-items: center; gap: 6px; }
+.idbox label { font-size: 12px; color: var(--muted); font-family: var(--sans); }
+select, input[type=text], textarea {
+  font: inherit; font-size: 13px;
+  color: var(--ink); background: var(--panel-alt);
+  border: 1px solid var(--line); border-radius: 3px; padding: 4px 6px;
+}
+select:focus, input:focus, textarea:focus, button:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+
+nav.tabs { display: flex; gap: 2px; flex-wrap: wrap; }
+nav.tabs button {
+  font: inherit; font-size: 13px; font-weight: 500;
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--muted); padding: 8px 12px; cursor: pointer;
+  transition: color .12s ease, border-color .12s ease;
+}
+nav.tabs button:hover { color: var(--ink); }
+nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+nav.tabs .count {
+  display: inline-block; margin-left: 6px; padding: 0 5px;
+  border-radius: 8px; background: var(--neutral-bg); color: var(--ink-soft);
+  font-size: 11px; font-family: var(--mono);
+}
+nav.tabs .count.alert { background: var(--warn-bg); color: var(--warn); }
+
+main { padding: 18px 20px 48px; max-width: 1500px; }
+
+/* --------------------------------------------------------------------------- */
+/* Panels, tables, primitives                                                   */
+/* --------------------------------------------------------------------------- */
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 4px; box-shadow: var(--shadow); margin-bottom: 18px;
+}
+.panel > h2 {
+  margin: 0; padding: 10px 14px;
+  font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted); border-bottom: 1px solid var(--line-soft);
+  display: flex; align-items: baseline; gap: 10px;
+}
+.panel > h2 .sub {
+  font-weight: 400; letter-spacing: 0; text-transform: none;
+  font-family: var(--mono); font-size: 11px;
+}
+.panel > h2 .right { margin-left: auto; }
+.panel .body { padding: 12px 14px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 18px; }
+.grid2 > .panel { margin-bottom: 0; }
+
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+thead th {
+  text-align: left; font-weight: 600; font-size: 11px; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--muted);
+  padding: 7px 10px; border-bottom: 1px solid var(--line);
+  white-space: nowrap; background: var(--panel);
+  position: sticky; top: 0;
+}
+tbody td { padding: 6px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr.click { cursor: pointer; }
+tbody tr.click:hover td, tbody tr.sel td { background: var(--panel-alt); }
+th.num, td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  white-space: nowrap;
+}
+td.mono, .mono { font-family: var(--mono); font-size: 12px; }
+td.wrap { white-space: normal; }
+.empty { color: var(--muted); padding: 14px; font-style: normal; }
+
+/* Key/value block */
+dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 0; }
+dl.kv dt { color: var(--muted); font-size: 12px; }
+dl.kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+dl.kv dd.num { text-align: right; font-family: var(--mono); }
+
+/* Stat strip */
+.stats { display: flex; flex-wrap: wrap; gap: 22px; }
+.stat { min-width: 120px; }
+.stat .label { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.stat .value { font-size: 19px; font-variant-numeric: tabular-nums; font-family: var(--mono); }
+.stat .value.bad { color: var(--bad); }
+.stat .value.ok  { color: var(--ok); }
+
+/* Pills */
+.pill {
+  display: inline-block; padding: 1px 7px; border-radius: 3px;
+  font-size: 11px; font-weight: 600; letter-spacing: .02em; white-space: nowrap;
+  background: var(--neutral-bg); color: var(--ink-soft); border: 1px solid transparent;
+}
+.pill.ok   { background: var(--ok-bg);   color: var(--ok); }
+.pill.warn { background: var(--warn-bg); color: var(--warn); }
+.pill.bad  { background: var(--bad-bg);  color: var(--bad); }
+.pill.info { background: var(--info-bg); color: var(--info); }
+
+/* Tool chips, coloured by tier */
+.chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--mono); font-size: 11px;
+  padding: 1px 6px; border-radius: 3px; border: 1px solid var(--line);
+  background: var(--neutral-bg); color: var(--ink-soft); white-space: nowrap;
+}
+.chip.read_only     { background: var(--info-bg); color: var(--info);  border-color: transparent; }
+.chip.state_change  { background: var(--warn-bg); color: var(--warn);  border-color: transparent; }
+.chip.money_movement{ background: var(--bad-bg);  color: var(--bad);   border-color: transparent; }
+.chip .mark { font-weight: 700; }
+.chip.denied, .chip.blocked { text-decoration: line-through; opacity: .8; }
+.sep { color: var(--muted); font-size: 11px; }
+
+/* Bars */
+.bar { position: relative; height: 8px; background: var(--neutral-bg); border-radius: 2px; min-width: 60px; }
+.bar > i { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 2px; display: block; }
+.bar.breached > i { background: var(--bad); }
+
+/* Buttons */
+button.act {
+  font: inherit; font-size: 12px; font-weight: 550;
+  padding: 4px 10px; border-radius: 3px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel-alt); color: var(--ink);
+  transition: background .12s ease, border-color .12s ease;
+}
+button.act:hover { background: var(--neutral-bg); }
+button.act.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-in); }
+button.act.primary:hover { filter: brightness(1.08); }
+button.act.danger { color: var(--bad); border-color: var(--line); }
+button.act.danger:hover { background: var(--bad-bg); }
+button.act[disabled] { opacity: .5; cursor: default; }
+
+/* Approval cards */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 14px; }
+.card { border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+.card .head {
+  padding: 9px 12px; border-bottom: 1px solid var(--line-soft);
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+.card .head .id { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-left: auto; }
+.card .body { padding: 10px 12px; display: grid; gap: 9px; }
+.card .summary { font-family: var(--mono); font-size: 12px; word-break: break-word; }
+.card .foot {
+  padding: 9px 12px; border-top: 1px solid var(--line-soft);
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+.card .foot input[type=text] { flex: 1 1 160px; min-width: 120px; }
+
+/* Verdict rows */
+.verdict { border-bottom: 1px solid var(--line-soft); padding: 10px 14px; }
+.verdict:last-child { border-bottom: none; }
+.verdict .line1 { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; }
+.verdict .vid { font-family: var(--mono); font-weight: 600; font-size: 12px; }
+.verdict .title { color: var(--ink-soft); }
+.verdict dl.kv { margin-top: 6px; font-size: 12px; }
+.verdict .refs { margin-top: 5px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.verdict.blocks { border-left: 3px solid var(--bad); }
+
+/* Banners */
+.banner {
+  border-radius: 4px; padding: 10px 14px; margin-bottom: 18px;
+  border: 1px solid var(--line); background: var(--panel);
+  display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+}
+.banner.ok  { background: var(--ok-bg);  border-color: transparent; color: var(--ok); }
+.banner.bad { background: var(--bad-bg); border-color: transparent; color: var(--bad); }
+.banner .t { font-weight: 650; }
+.banner .d { color: inherit; opacity: .9; font-size: 13px; }
+
+#toast {
+  position: fixed; right: 18px; bottom: 18px; z-index: 40; max-width: 420px;
+  background: var(--panel); border: 1px solid var(--line); border-left-width: 3px;
+  border-radius: 3px; box-shadow: var(--shadow); padding: 9px 13px; font-size: 13px;
+  opacity: 0; transform: translateY(4px);
+  transition: opacity .15s ease, transform .15s ease;
+  pointer-events: none;
+}
+#toast.show { opacity: 1; transform: none; }
+#toast.ok  { border-left-color: var(--ok); }
+#toast.bad { border-left-color: var(--bad); }
+
+pre.args {
+  margin: 4px 0 0; padding: 8px 10px; background: var(--panel-alt);
+  border: 1px solid var(--line-soft); border-radius: 3px;
+  font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; word-break: break-word;
+  max-height: 260px; overflow: auto;
+}
+details > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+details[open] > summary { margin-bottom: 4px; }
+
+form.runform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+form.runform input[type=text] { flex: 1 1 380px; }
+
+.note { color: var(--muted); font-size: 12px; }
+.spacer { flex: 1 1 auto; }
+.hidden { display: none !important; }
+
+@media (max-width: 860px) {
+  main { padding: 14px 12px 40px; }
+  header.top { padding: 8px 12px 0; }
+  .cards { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="brandrow">
+    <div class="brand">TCRP <span>Governance Console</span></div>
+    <div class="buildline" id="buildline"></div>
+    <div class="idbox">
+      <label for="principal">Acting as</label>
+      <select id="principal"></select>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs" role="tablist"></nav>
+</header>
+
+<main>
+  <div id="offline" class="banner bad hidden">
+    <span class="t">The API is unreachable.</span>
+    <span class="d" id="offline-detail"></span>
+    <span class="spacer"></span>
+    <button class="act" id="retry">Retry now</button>
+  </div>
+  <div id="view"></div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* ---------------------------------------------------------------------------
+   The console is a reader of the API and nothing else. It computes no figure of
+   its own: every number on the screen is a string the platform rendered, and
+   every action is a call to the same endpoint the CLI would use. Where a value
+   is charted, the exact one travels alongside it and the chart uses only the
+   scaled copy.
+   --------------------------------------------------------------------------- */
+
+const TABS = [
+  { id: "runs",         label: "Runs" },
+  { id: "approvals",    label: "Approvals" },
+  { id: "risk",         label: "Risk" },
+  { id: "recon",        label: "Reconciliation" },
+  { id: "conformance",  label: "Conformance" },
+  { id: "audit",        label: "Audit" }
+];
+
+const POLL_MS = 10000;
+
+const state = {
+  tab: "runs",
+  principal: readStored("tcrp.principal", "operator"),
+  principals: ["analyst", "operator", "agent", "risk-manager", "treasurer", "auditor"],
+  selectedRun: null,
+  pendingCount: 0,
+  offline: false,
+  busy: false,
+  timer: null,
+  tick: null,
+  expiries: []
+};
+
+function readStored(key, fallback) {
+  try { return window.localStorage.getItem(key) || fallback; } catch (e) { return fallback; }
+}
+function writeStored(key, value) {
+  try { window.localStorage.setItem(key, value); } catch (e) { /* private mode */ }
+}
+
+/* --------------------------------------------------------------------------- */
+/* Transport                                                                    */
+/* --------------------------------------------------------------------------- */
+
+async function api(path, options) {
+  const opts = options || {};
+  const headers = {
+    "Accept": "application/json",
+    "X-TCRP-Dev-Principal": state.principal
+  };
+  if (opts.body !== undefined) { headers["Content-Type"] = "application/json"; }
+  let res;
+  try {
+    res = await fetch(path, {
+      method: opts.method || "GET",
+      headers: headers,
+      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+      cache: "no-store"
+    });
+  } catch (err) {
+    goOffline(String(err && err.message ? err.message : err));
+    throw new Error("unreachable");
+  }
+  goOnline();
+  const text = await res.text();
+  let body = null;
+  if (text) { try { body = JSON.parse(text); } catch (e) { body = { raw: text }; } }
+  if (!res.ok) {
+    const e = body && body.error ? body.error : { code: String(res.status), message: res.statusText };
+    const err = new Error(e.message || "request failed");
+    err.code = e.code;
+    err.status = res.status;
+    throw err;
+  }
+  return body;
+}
+
+function goOffline(detail) {
+  state.offline = true;
+  document.getElementById("offline").classList.remove("hidden");
+  document.getElementById("offline-detail").textContent =
+    (detail ? detail + ". " : "") + "The last known figures are shown below and may be stale.";
+}
+function goOnline() {
+  if (!state.offline) { return; }
+  state.offline = false;
+  document.getElementById("offline").classList.add("hidden");
+}
+
+/* --------------------------------------------------------------------------- */
+/* Rendering primitives                                                         */
+/* --------------------------------------------------------------------------- */
+
+function esc(v) {
+  if (v === null || v === undefined) { return ""; }
+  return String(v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function money(a) { return a && a.display ? esc(a.display) : "-"; }
+function ratio(r) { return r && r.display ? esc(r.display) : "-"; }
+
+function int(n) {
+  if (n === null || n === undefined) { return "-"; }
+  const neg = n < 0;
+  const s = String(Math.abs(n));
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    if (i > 0 && (s.length - i) % 3 === 0) { out += ","; }
+    out += s[i];
+  }
+  return (neg ? "-" : "") + out;
+}
+
+function stamp(t) {
+  if (!t) { return "-"; }
+  const d = new Date(t);
+  if (isNaN(d.getTime())) { return esc(t); }
+  return d.toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z");
+}
+
+function shortHash(h) { return h ? esc(String(h).slice(0, 12)) : "-"; }
+
+function duration(seconds) {
+  if (seconds === null || seconds === undefined) { return "-"; }
+  const neg = seconds < 0;
+  let s = Math.floor(Math.abs(seconds));
+  const h = Math.floor(s / 3600); s -= h * 3600;
+  const m = Math.floor(s / 60); s -= m * 60;
+  const pad = (n) => (n < 10 ? "0" + n : String(n));
+  const body = h > 0 ? h + "h " + pad(m) + "m " + pad(s) + "s" : m + "m " + pad(s) + "s";
+  return (neg ? "-" : "") + body;
+}
+
+function pill(text, kind) { return '<span class="pill ' + (kind || "") + '">' + esc(text) + "</span>"; }
+
+const STATUS_KIND = {
+  completed: "ok", pass: "ok", ok: "ok", allowed: "ok", granted: "ok", resolved: "ok", balanced: "ok",
+  awaiting_approval: "warn", pending: "warn", running: "info", acknowledged: "warn",
+  inconclusive: "warn", warning: "warn", warn: "warn", medium: "warn", high: "warn",
+  failed: "bad", blocked: "bad", rejected: "bad", denied: "bad", fail: "bad", error: "bad",
+  critical: "bad", breach: "bad", open: "warn", expired: "bad", low: ""
+};
+function statusPill(v) { return pill(v || "-", STATUS_KIND[String(v)] || ""); }
+
+function table(head, rows, opts) {
+  const o = opts || {};
+  if (!rows.length) { return '<div class="empty">' + esc(o.empty || "Nothing to show.") + "</div>"; }
+  let h = '<div class="scroll"><table><thead><tr>';
+  head.forEach(function (c) {
+    h += "<th" + (c.num ? ' class="num"' : "") + ">" + esc(c.label) + "</th>";
+  });
+  h += "</tr></thead><tbody>" + rows.join("") + "</tbody></table></div>";
+  return h;
+}
+
+function panel(title, sub, bodyHTML, rightHTML) {
+  return '<section class="panel"><h2>' + esc(title) +
+    (sub ? ' <span class="sub">' + esc(sub) + "</span>" : "") +
+    (rightHTML ? '<span class="right">' + rightHTML + "</span>" : "") +
+    "</h2>" + bodyHTML + "</section>";
+}
+
+function toast(message, kind) {
+  const el = document.getElementById("toast");
+  el.textContent = message;
+  el.className = "show " + (kind || "");
+  window.clearTimeout(toast._t);
+  toast._t = window.setTimeout(function () { el.className = kind || ""; }, 4200);
+}
+
+/* --------------------------------------------------------------------------- */
+/* Tab: Runs                                                                    */
+/* --------------------------------------------------------------------------- */
+
+function chipHTML(c) {
+  const cls = "chip " + esc(c.tier || "") +
+    (c.outcome === "policy_denied" || c.outcome === "guard_blocked" ? " denied" : "");
+  const mark = c.outcome === "policy_denied" ? "deny"
+    : c.outcome === "guard_blocked" ? "block"
+    : c.outcome === "awaiting_approval" ? "hold"
+    : c.outcome === "tool_error" ? "error" : "";
+  return '<span class="' + cls + '" title="' + esc(c.tier + " / " + c.outcome) + '">' +
+    esc(c.tool) + (mark ? ' <span class="mark">' + esc(mark) + "</span>" : "") + "</span>";
+}
+
+function trajectoryHTML(chips) {
+  if (!chips || !chips.length) { return '<span class="note">no tool calls</span>'; }
+  const parts = [];
+  chips.forEach(function (c, i) {
+    if (i > 0) { parts.push('<span class="sep">&rarr;</span>'); }
+    parts.push(chipHTML(c));
+  });
+  return '<div class="chips">' + parts.join("") + "</div>";
+}
+
+async function renderRuns() {
+  const data = await api("/v1/runs?limit=50");
+  const runs = data.runs || [];
+  if (state.selectedRun === null && runs.length) { state.selectedRun = runs[0].id; }
+
+  const rows = runs.map(function (r) {
+    const sel = r.id === state.selectedRun ? " sel" : "";
+    return '<tr class="click' + sel + '" data-run="' + esc(r.id) + '">' +
+      '<td class="mono">' + esc(r.id) + "</td>" +
+      "<td>" + statusPill(r.status) + "</td>" +
+      '<td class="mono">' + esc(r.principal) + (r.on_behalf ? '<br><span class="note">obo ' + esc(r.on_behalf) + "</span>" : "") + "</td>" +
+      '<td class="wrap">' + esc(r.query) + "</td>" +
+      "<td>" + trajectoryHTML(r.trajectory) + "</td>" +
+      '<td class="num">' + esc(r.steps) + "</td>" +
+      '<td class="mono">' + stamp(r.created_at) + "</td>" +
+      "</tr>";
+  });
+
+  const form =
+    '<form class="runform" id="startrun">' +
+    '<input type="text" id="runquery" placeholder="Ask the desk agent, e.g. transfer 1,000,000 shares to CP-ALPHA" ' +
+    'value="Is CP-DELTA under-margined?" autocomplete="off">' +
+    '<label class="note" for="runas">as</label>' +
+    '<select id="runas"></select>' +
+    '<button class="act primary" type="submit" id="runbtn">Start run</button>' +
+    "</form>";
+
+  let html = panel("Start a governed run", "POST /v1/runs", '<div class="body">' + form +
+    '<p class="note" style="margin:8px 0 0">Every run passes the guardrail, the policy gateway and, at the ' +
+    "money-movement tier, a human approval gate. Nothing here can skip one.</p></div>");
+
+  html += panel("Recent runs", data.count + " shown", table(
+    [{ label: "Run" }, { label: "Status" }, { label: "Principal" }, { label: "Query" },
+     { label: "Trajectory" }, { label: "Steps", num: true }, { label: "Started" }],
+    rows, { empty: "No runs yet. Start one above." }));
+
+  html += '<div id="rundetail"></div>';
+  setView(html);
+
+  const sel = document.getElementById("runas");
+  sel.innerHTML = state.principals.map(function (p) {
+    return '<option value="' + esc(p) + '"' + (p === "agent" ? " selected" : "") + ">" + esc(p) + "</option>";
+  }).join("");
+
+  document.getElementById("startrun").addEventListener("submit", startRun);
+  document.querySelectorAll("tr[data-run]").forEach(function (tr) {
+    tr.addEventListener("click", function () {
+      state.selectedRun = tr.getAttribute("data-run");
+      refresh();
+    });
+  });
+
+  if (state.selectedRun) { await renderRunDetail(state.selectedRun); }
+}
+
+async function startRun(ev) {
+  ev.preventDefault();
+  const btn = document.getElementById("runbtn");
+  const query = document.getElementById("runquery").value;
+  const as = document.getElementById("runas").value;
+  btn.disabled = true;
+  btn.textContent = "Running";
+  try {
+    const run = await api("/v1/runs", { method: "POST", body: { query: query, principal: as } });
+    state.selectedRun = run.id;
+    toast("Run " + run.id + " finished as " + run.status.replace(/_/g, " ") + ".",
+      run.status === "awaiting_approval" ? "" : "ok");
+    await refresh();
+  } catch (err) {
+    toast("Could not start the run: " + err.message, "bad");
+    btn.disabled = false;
+    btn.textContent = "Start run";
+  }
+}
+
+async function renderRunDetail(id) {
+  let run;
+  try { run = await api("/v1/runs/" + encodeURIComponent(id)); }
+  catch (err) {
+    document.getElementById("rundetail").innerHTML =
+      panel("Run detail", id, '<div class="empty">' + esc(err.message) + "</div>");
+    return;
+  }
+
+  const steps = (run.steps || []).map(function (s) {
+    const guard = s.guard_verdict ? statusPill(s.guard_verdict) : '<span class="note">-</span>';
+    const approval = s.approval_id
+      ? '<span class="mono">' + esc(s.approval_id) + "</span>" +
+        (s.approved_by && s.approved_by.length ? '<br><span class="note">by ' + esc(s.approved_by.join(", ")) + "</span>" : "")
+      : '<span class="note">not required</span>';
+    const rule = s.policy_rule
+      ? '<span class="mono">' + esc(s.policy_rule) + "</span>" +
+        (s.policy_reason ? '<br><span class="note">' + esc(s.policy_reason) + "</span>" : "")
+      : '<span class="note">-</span>';
+    const tool = s.tool
+      ? chipHTML({ tool: s.tool, tier: s.tier, outcome: s.outcome })
+      : '<span class="note">model turn</span>';
+    const args = s.args && Object.keys(s.args).length
+      ? "<details><summary>arguments</summary><pre class=\"args\">" + esc(JSON.stringify(s.args, null, 2)) + "</pre></details>"
+      : "";
+    return "<tr>" +
+      '<td class="num">' + esc(s.n) + "</td>" +
+      "<td>" + tool + args + "</td>" +
+      "<td>" + (s.policy_allow ? pill("allow", "ok") : pill("deny", "bad")) + "</td>" +
+      '<td class="wrap">' + rule + "</td>" +
+      "<td>" + guard + (s.guard_reason ? '<br><span class="note">' + esc(s.guard_reason) + "</span>" : "") + "</td>" +
+      '<td class="wrap">' + approval + "</td>" +
+      "<td>" + statusPill(s.outcome) + "</td>" +
+      '<td class="num">' + esc((s.duration_ms || 0).toFixed ? s.duration_ms.toFixed(2) : s.duration_ms) + "</td>" +
+      "</tr>";
+  });
+
+  const head = '<div class="body"><dl class="kv">' +
+    "<dt>Status</dt><dd>" + statusPill(run.status) + "</dd>" +
+    "<dt>Principal</dt><dd class=\"mono\">" + esc(run.principal ? run.principal.sub : "-") +
+      (run.principal && run.principal.obo ? " on behalf of " + esc(run.principal.obo) : "") + "</dd>" +
+    "<dt>Model</dt><dd class=\"mono\">" + esc(run.model) + "</dd>" +
+    "<dt>Policy bundle</dt><dd class=\"mono\">" + esc(run.policy_bundle || "-") + "</dd>" +
+    "<dt>Guardrail policy</dt><dd class=\"mono\">" + esc(run.guard_policy || "-") + "</dd>" +
+    "<dt>Retrieval</dt><dd>" + (run.retrieval_trusted ? pill("trusted", "ok") : pill("quarantined", "bad")) + "</dd>" +
+    "<dt>Trace</dt><dd class=\"mono\">" + esc(run.trace_id || "-") + "</dd>" +
+    "</dl>" +
+    (run.answer ? '<details style="margin-top:10px" open><summary>answer</summary><pre class="args">' + esc(run.answer) + "</pre></details>" : "") +
+    (run.error ? '<p class="note" style="color:var(--bad)">' + esc(run.error) + "</p>" : "") +
+    "</div>";
+
+  let html = panel("Run " + run.id, run.query, head);
+
+  if (run.approval) {
+    html += panel("Paused for approval", run.approval.id,
+      '<div class="body">' + approvalCardBody(run.approval) + "</div>");
+  }
+
+  html += panel("Steps", (run.steps || []).length + " recorded", table(
+    [{ label: "#", num: true }, { label: "Tool" }, { label: "Policy" }, { label: "Rule" },
+     { label: "Guardrail" }, { label: "Approval" }, { label: "Outcome" }, { label: "ms", num: true }],
+    steps, { empty: "No steps recorded." }));
+
+  document.getElementById("rundetail").innerHTML = html;
+  wireApprovalButtons();
+}
+
+/* --------------------------------------------------------------------------- */
+/* Tab: Approvals                                                               */
+/* --------------------------------------------------------------------------- */
+
+function approvalCardBody(a) {
+  const roles = (a.required_roles || []).join(", ") || "any";
+  const eligible = (a.eligible_approvers || []).join(", ") || "nobody currently holds the role";
+  const args = a.args && Object.keys(a.args).length
+    ? "<details><summary>arguments</summary><pre class=\"args\">" + esc(JSON.stringify(a.args, null, 2)) + "</pre></details>"
+    : "";
+  return '<div class="summary">' + esc(a.summary || a.tool) + "</div>" + args +
+    '<dl class="kv">' +
+    "<dt>Run</dt><dd class=\"mono\">" + esc(a.run_id) + "</dd>" +
+    "<dt>Tier</dt><dd>" + pill(a.tier, a.tier === "money_movement" ? "bad" : "warn") + "</dd>" +
+    "<dt>Requested by</dt><dd class=\"mono\">" + esc(a.requester) +
+      (a.on_behalf_of ? " on behalf of " + esc(a.on_behalf_of) : "") + "</dd>" +
+    "<dt>Policy rule</dt><dd class=\"mono\">" + esc(a.policy_rule || "-") + "</dd>" +
+    "<dt>Approvals</dt><dd>" + esc((a.grants || []).length) + " of " + esc(a.required_count) +
+      " &middot; roles " + esc(roles) + "</dd>" +
+    "<dt>May approve</dt><dd class=\"mono\">" + esc(eligible) + "</dd>" +
+    "<dt>Expires</dt><dd class=\"mono\"><span data-expiry=\"" + esc(a.id) + "\">" +
+      esc(a.expired ? "window closed" : "in " + duration(a.expires_in_seconds)) + "</span></dd>" +
+    "<dt>Arguments hash</dt><dd class=\"mono\">" + shortHash(a.args_hash) + "</dd>" +
+    "</dl>";
+}
+
+function approvalCard(a) {
+  const closed = a.expired || a.status !== "pending";
+  return '<article class="card">' +
+    '<div class="head">' + statusPill(a.status) +
+      '<span class="mono">' + esc(a.tool) + "</span>" +
+      '<span class="id">' + esc(a.id) + "</span></div>" +
+    '<div class="body">' + approvalCardBody(a) + "</div>" +
+    '<div class="foot">' +
+      '<input type="text" placeholder="Note for the record" data-note="' + esc(a.id) + '" autocomplete="off">' +
+      '<button class="act primary" data-grant="' + esc(a.id) + '"' + (closed ? " disabled" : "") + ">Grant</button>" +
+      '<button class="act danger" data-deny="' + esc(a.id) + '"' + (closed ? " disabled" : "") + ">Deny</button>" +
+    "</div></article>";
+}
+
+async function renderApprovals() {
+  const data = await api("/v1/approvals");
+  const list = data.approvals || [];
+  state.pendingCount = list.length;
+  const body = list.length
+    ? '<div class="body"><div class="cards">' + list.map(approvalCard).join("") + "</div></div>"
+    : '<div class="empty">No gate is open. A money-movement step opens one automatically.</div>';
+  setView(panel("Pending approvals", data.count + " open", body) +
+    panel("How a gate is decided", "four-eyes control",
+      '<div class="body"><p class="note" style="margin:0">' +
+      "The approver is taken from the authenticated principal and never from the request body. " +
+      "The service refuses a requester approving their own action, an approver who has already " +
+      "responded, an approver without an authorising role or the approvals:grant scope, and any " +
+      "gate whose window has closed. Granting re-evaluates the policy at dispatch with the approval " +
+      "attached, so the permission recorded at proposal time is not carried forward." +
+      "</p></div>"));
+  wireApprovalButtons();
+  trackExpiries(list);
+}
+
+function wireApprovalButtons() {
+  document.querySelectorAll("[data-grant]").forEach(function (b) {
+    b.addEventListener("click", function () { decide(b.getAttribute("data-grant"), "grant"); });
+  });
+  document.querySelectorAll("[data-deny]").forEach(function (b) {
+    b.addEventListener("click", function () { decide(b.getAttribute("data-deny"), "deny"); });
+  });
+}
+
+async function decide(id, verb) {
+  const noteEl = document.querySelector('[data-note="' + id.replace(/"/g, "") + '"]');
+  const note = noteEl ? noteEl.value : "";
+  document.querySelectorAll('[data-grant="' + id + '"],[data-deny="' + id + '"]').forEach(function (b) {
+    b.disabled = true;
+  });
+  try {
+    const res = await api("/v1/approvals/" + encodeURIComponent(id) + "/" + verb, {
+      method: "POST", body: { note: note }
+    });
+    const run = res.run;
+    const suffix = run ? " Run " + run.id + " is now " + String(run.status).replace(/_/g, " ") + "." : "";
+    toast((verb === "grant" ? "Granted." : "Denied.") + suffix, verb === "grant" ? "ok" : "");
+    await refresh();
+  } catch (err) {
+    toast("Refused: " + err.message, "bad");
+    await refresh();
+  }
+}
+
+function trackExpiries(list) {
+  state.expiries = (list || []).map(function (a) {
+    return { id: a.id, seconds: a.expires_in_seconds, expired: a.expired };
+  });
+}
+
+function tickExpiries() {
+  state.expiries.forEach(function (e) {
+    e.seconds -= 1;
+    const el = document.querySelector('[data-expiry="' + e.id + '"]');
+    if (!el) { return; }
+    el.textContent = e.seconds <= 0 ? "window closed" : "in " + duration(e.seconds);
+  });
+}
+
+/* --------------------------------------------------------------------------- */
+/* Tab: Risk                                                                    */
+/* --------------------------------------------------------------------------- */
+
+async function renderRisk() {
+  const [exp, breaches, conc] = await Promise.all([
+    api("/v1/exposure"),
+    api("/v1/breaches"),
+    api("/v1/concentration")
+  ]);
+
+  const stats =
+    '<div class="body"><div class="stats">' +
+    stat("Counterparties", String(exp.count)) +
+    stat("Uncovered exposure", exp.total_uncovered.display, exp.total_uncovered.units > 0 ? "bad" : "ok") +
+    stat("Margin shortfall", exp.total_shortfall.display, exp.total_shortfall.units > 0 ? "bad" : "ok") +
+    stat("Open breaches", String(breaches.count), breaches.count > 0 ? "bad" : "ok") +
+    stat("Data quality", String(exp.quality), exp.quality === "pass" ? "ok" : "bad") +
+    "</div></div>";
+
+  const expRows = (exp.exposures || []).map(function (x) {
+    return "<tr>" +
+      '<td class="mono">' + esc(x.counterparty) + "</td>" +
+      '<td class="wrap">' + esc(x.name || "") + "</td>" +
+      '<td class="num">' + money(x.gross_exposure) + "</td>" +
+      '<td class="num">' + money(x.net_exposure) + "</td>" +
+      '<td class="num">' + money(x.collateral_value) + "</td>" +
+      '<td class="num">' + money(x.uncovered_exposure) + "</td>" +
+      '<td class="num">' + money(x.threshold) + "</td>" +
+      '<td class="num">' + money(x.margin_shortfall) + "</td>" +
+      "<td>" + (x.covered ? pill("covered", "ok") : pill("uncovered", "bad")) + "</td>" +
+      "</tr>";
+  });
+
+  const breachRows = (breaches.breaches || []).map(function (b) {
+    return "<tr>" +
+      "<td>" + statusPill(b.severity) + "</td>" +
+      "<td>" + statusPill(b.status) + "</td>" +
+      '<td class="mono">' + esc(b.limit_id) + "</td>" +
+      '<td class="mono">' + esc(b.scope) + "</td>" +
+      '<td class="num">' + (b.observed.units ? money(b.observed) : ratio(b.observed_pct)) + "</td>" +
+      '<td class="num">' + (b.limit.units ? money(b.limit) : ratio(b.limit_pct)) + "</td>" +
+      '<td class="num">' + ratio(b.utilisation) + "</td>" +
+      "</tr>";
+  });
+
+  const buckets = (conc.concentration || []);
+  let maxShare = 0;
+  buckets.forEach(function (c) { if (c.share.percent > maxShare) { maxShare = c.share.percent; } });
+  const concRows = buckets.map(function (c) {
+    const width = maxShare > 0 ? Math.max(2, Math.round(c.share.percent / maxShare * 100)) : 0;
+    return "<tr>" +
+      '<td class="mono">' + esc(c.dimension) + "</td>" +
+      '<td class="wrap">' + esc(c.bucket) + "</td>" +
+      '<td class="num">' + money(c.value) + "</td>" +
+      '<td class="num">' + ratio(c.share) + "</td>" +
+      '<td style="width:34%"><span class="bar' + (c.breached ? " breached" : "") + '">' +
+        '<i style="width:' + width + '%"></i></span></td>' +
+      '<td class="num">' + ratio(c.limit) + "</td>" +
+      "<td>" + (c.breached ? pill("breached", "bad") : "") + "</td>" +
+      "</tr>";
+  });
+
+  setView(
+    panel("Book", "as of " + stamp(exp.as_of), stats) +
+    panel("Counterparty exposure", "GET /v1/exposure", table(
+      [{ label: "Counterparty" }, { label: "Name" }, { label: "Gross", num: true },
+       { label: "Net", num: true }, { label: "Collateral", num: true },
+       { label: "Uncovered", num: true }, { label: "Threshold", num: true },
+       { label: "Margin call", num: true }, { label: "" }],
+      expRows, { empty: "No counterparties in the snapshot." })) +
+    panel("Limit breaches", "GET /v1/breaches", table(
+      [{ label: "Severity" }, { label: "Status" }, { label: "Limit" }, { label: "Scope" },
+       { label: "Observed", num: true }, { label: "Limit", num: true }, { label: "Utilisation", num: true }],
+      breachRows, { empty: "Every limit is observed." })) +
+    panel("Concentration", "GET /v1/concentration", table(
+      [{ label: "Dimension" }, { label: "Bucket" }, { label: "Value", num: true },
+       { label: "Share", num: true }, { label: "" }, { label: "Limit", num: true }, { label: "" }],
+      concRows, { empty: "Nothing to measure." }))
+  );
+}
+
+function stat(label, value, kind) {
+  return '<div class="stat"><div class="label">' + esc(label) + "</div>" +
+    '<div class="value ' + (kind || "") + '">' + esc(value) + "</div></div>";
+}
+
+/* --------------------------------------------------------------------------- */
+/* Tab: Reconciliation                                                          */
+/* --------------------------------------------------------------------------- */
+
+async function renderRecon() {
+  const [breaks, supply] = await Promise.all([api("/v1/breaks"), api("/v1/supply")]);
+
+  const rows = (breaks.breaks || []).map(function (b) {
+    return "<tr>" +
+      "<td>" + statusPill(b.severity) + "</td>" +
+      "<td>" + statusPill(b.status) + "</td>" +
+      '<td class="mono">' + esc(b.id) + "</td>" +
+      '<td class="mono">' + esc(b.kind) + "</td>" +
+      '<td class="mono">' + esc(b.counterparty || "-") + "</td>" +
+      '<td class="mono">' + esc(b.ledger || "-") + "</td>" +
+      '<td class="num">' + int(b.book_qty) + "</td>" +
+      '<td class="num">' + int(b.ledger_qty) + "</td>" +
+      '<td class="num">' + int(b.delta) + "</td>" +
+      '<td class="num">' + esc(Math.round(b.age_minutes)) + "m</td>" +
+      '<td><button class="act" data-ack="' + esc(b.id) + '">Acknowledge</button> ' +
+        '<button class="act" data-res="' + esc(b.id) + '">Resolve</button></td>' +
+      "</tr>";
+  });
+
+  const ageing = (breaks.ageing || []).map(function (a) {
+    return stat(a.label, String(a.count), a.count > 0 && a.upto === 0 ? "bad" : "");
+  }).join("");
+
+  const supplyRows = (supply.symbols || []).map(function (s) {
+    return "<tr>" +
+      '<td class="mono">' + esc(s.symbol) + "</td>" +
+      '<td class="num">' + int(s.source_supply) + "</td>" +
+      '<td class="num">' + int(s.target_supply) + "</td>" +
+      '<td class="num">' + int(s.locked_on_source) + "</td>" +
+      '<td class="num">' + int(s.bridged_to_target) + "</td>" +
+      '<td class="num">' + int(s.circulating) + "</td>" +
+      '<td class="num">' + int(s.issued) + "</td>" +
+      '<td class="num">' + int(s.redeemed) + "</td>" +
+      '<td class="num">' + int(s.lock_delta) + "</td>" +
+      '<td class="num">' + int(s.issuance_delta) + "</td>" +
+      "<td>" + (s.balanced ? pill("balanced", "ok") : pill("break", "bad")) + "</td>" +
+      "</tr>";
+  });
+
+  setView(
+    panel("Reconciliation run", "compared " + breaks.compared + ", matched " + breaks.matched +
+      ", suppressed " + breaks.suppressed,
+      '<div class="body"><div class="stats">' + ageing +
+      stat("Open breaks", String(breaks.count), breaks.count > 0 ? "bad" : "ok") + "</div>" +
+      '<p class="note" style="margin:10px 0 0">Materiality ' + int(breaks.policy.materiality_qty) +
+      " units; escalated above " + int(breaks.policy.high_qty) + ", critical above " +
+      int(breaks.policy.critical_qty) + "; an observation older than " + esc(breaks.policy.stale_after) +
+      " is a break in its own right.</p></div>") +
+    panel("Open breaks", "GET /v1/breaks", table(
+      [{ label: "Severity" }, { label: "Status" }, { label: "Break" }, { label: "Kind" },
+       { label: "Counterparty" }, { label: "Ledger" }, { label: "Book", num: true },
+       { label: "Ledger", num: true }, { label: "Delta", num: true }, { label: "Age", num: true },
+       { label: "" }],
+      rows, { empty: "The ledgers and the book of record agree." })) +
+    panel("Cross-network supply", supply.source_ledger + " to " + supply.target_ledger +
+      (supply.balanced ? " - balanced" : " - out of balance"), table(
+      [{ label: "Symbol" }, { label: "Source supply", num: true }, { label: "Target supply", num: true },
+       { label: "Locked", num: true }, { label: "Bridged", num: true }, { label: "Circulating", num: true },
+       { label: "Issued", num: true }, { label: "Redeemed", num: true },
+       { label: "Lock delta", num: true }, { label: "Issuance delta", num: true }, { label: "" }],
+      supplyRows, { empty: "No symbols reconciled." }))
+  );
+
+  document.querySelectorAll("[data-ack]").forEach(function (b) {
+    b.addEventListener("click", function () { decideBreak(b.getAttribute("data-ack"), "acknowledge"); });
+  });
+  document.querySelectorAll("[data-res]").forEach(function (b) {
+    b.addEventListener("click", function () { decideBreak(b.getAttribute("data-res"), "resolve"); });
+  });
+}
+
+async function decideBreak(id, verb) {
+  const note = window.prompt(verb === "resolve" ? "Resolution" : "Acknowledgement note", "");
+  if (note === null) { return; }
+  try {
+    await api("/v1/breaks/" + encodeURIComponent(id) + "/" + verb, { method: "POST", body: { note: note } });
+    toast("Break " + id + " " + verb + "d.", "ok");
+    await refresh();
+  } catch (err) {
+    toast("Refused: " + err.message, "bad");
+  }
+}
+
+/* --------------------------------------------------------------------------- */
+/* Tab: Conformance                                                             */
+/* --------------------------------------------------------------------------- */
+
+async function renderConformance() {
+  const data = await api("/v1/conformance");
+  const rep = data.report || {};
+  const verdicts = (rep.verdicts || []).map(function (v) {
+    const refs = (v.evidence_refs || []).map(function (r) {
+      return esc(r.kind + ":" + r.id + (r.detail ? " (" + r.detail + ")" : "") + (r.hash ? " " + String(r.hash).slice(0, 12) : ""));
+    }).join(" &middot; ");
+    return '<div class="verdict' + (v.status !== "pass" && v.severity === "critical" ? " blocks" : "") + '">' +
+      '<div class="line1">' +
+        '<span class="vid">' + esc(v.id) + "</span>" +
+        statusPill(v.status) + pill(v.severity, v.severity === "critical" ? "bad" : "") +
+        '<span class="pill">' + esc(v.domain) + "</span>" +
+        '<span class="title">' + esc(v.title) + "</span>" +
+      "</div>" +
+      '<dl class="kv">' +
+        "<dt>Expected</dt><dd>" + esc(v.expected) + "</dd>" +
+        "<dt>Observed</dt><dd>" + esc(v.observed) + "</dd>" +
+        (v.detail ? "<dt>Detail</dt><dd>" + esc(v.detail) + "</dd>" : "") +
+      "</dl>" +
+      (refs ? '<div class="refs">evidence: ' + refs + "</div>" : "") +
+      "</div>";
+  }).join("");
+
+  const gate = data.gate_passed
+    ? '<div class="banner ok"><span class="t">Gate passed.</span>' +
+      '<span class="d">Every critical invariant reached a conclusion and held.</span></div>'
+    : '<div class="banner bad"><span class="t">Gate failed.</span>' +
+      '<span class="d">' + esc(data.gate_error || "") + "</span></div>";
+
+  const manifest = (data.manifest || []).map(function (a) {
+    return "<tr>" +
+      '<td class="mono">' + esc(a.name) + "</td>" +
+      '<td class="mono">' + esc(a.kind) + "</td>" +
+      '<td class="num">' + int(a.count) + "</td>" +
+      '<td class="mono">' + shortHash(a.digest) + "</td>" +
+      "</tr>";
+  });
+
+  setView(gate +
+    panel("Invariants", rep.passed + " pass, " + rep.failed + " fail, " + rep.inconclusive + " inconclusive",
+      verdicts || '<div class="empty">No invariants ran.</div>') +
+    panel("Evidence manifest", "audit head " + shortHash(data.audit_head), table(
+      [{ label: "Artefact" }, { label: "Kind" }, { label: "Items", num: true }, { label: "Digest" }],
+      manifest, { empty: "No evidence was collected." })) +
+    panel("Why inconclusive is not a pass", "",
+      '<div class="body"><p class="note" style="margin:0">' +
+      "An invariant that could not find its evidence proves nothing, so it reports inconclusive rather " +
+      "than pass, and a critical inconclusive stops the gate exactly as a failure does. The alternative " +
+      "is a build that goes green when the telemetry stops arriving." +
+      "</p></div>"));
+}
+
+/* --------------------------------------------------------------------------- */
+/* Tab: Audit                                                                   */
+/* --------------------------------------------------------------------------- */
+
+async function renderAudit() {
+  const data = await api("/v1/audit?limit=" + encodeURIComponent(auditLimit()));
+  const rows = (data.records || []).slice().reverse().map(function (r) {
+    const details = r.details && Object.keys(r.details).length
+      ? "<details><summary>details</summary><pre class=\"args\">" + esc(JSON.stringify(r.details, null, 2)) + "</pre></details>"
+      : "";
+    return "<tr>" +
+      '<td class="num mono">' + esc(r.seq) + "</td>" +
+      '<td class="mono">' + stamp(r.time) + "</td>" +
+      '<td class="mono">' + esc(r.actor) + (r.on_behalf ? '<br><span class="note">obo ' + esc(r.on_behalf) + "</span>" : "") + "</td>" +
+      '<td class="mono">' + esc(r.action) + "</td>" +
+      '<td class="wrap mono">' + esc(r.subject) + details + "</td>" +
+      "<td>" + statusPill(r.outcome) + "</td>" +
+      '<td class="mono">' + esc(r.run_id || "-") + "</td>" +
+      '<td class="mono">' + shortHash(r.prev_hash) + "</td>" +
+      '<td class="mono">' + shortHash(r.hash) + "</td>" +
+      "</tr>";
+  });
+
+  const controls =
+    '<button class="act primary" id="verify">Verify chain</button> ' +
+    '<select id="auditlimit">' +
+      [50, 100, 250, 500].map(function (n) {
+        return '<option value="' + n + '"' + (n === auditLimit() ? " selected" : "") + ">last " + n + "</option>";
+      }).join("") +
+    "</select>";
+
+  setView(
+    '<div id="verifyresult"></div>' +
+    panel("Audit chain", data.total + " matching, " + data.length + " total, head " + shortHash(data.head),
+      table(
+        [{ label: "Seq", num: true }, { label: "Time" }, { label: "Actor" }, { label: "Action" },
+         { label: "Subject" }, { label: "Outcome" }, { label: "Run" },
+         { label: "Prev hash" }, { label: "Hash" }],
+        rows, { empty: "The chain is empty." }),
+      controls));
+
+  document.getElementById("verify").addEventListener("click", verifyChain);
+  document.getElementById("auditlimit").addEventListener("change", function (e) {
+    writeStored("tcrp.auditlimit", e.target.value);
+    refresh();
+  });
+}
+
+function auditLimit() {
+  const n = parseInt(readStored("tcrp.auditlimit", "100"), 10);
+  return isNaN(n) ? 100 : n;
+}
+
+async function verifyChain() {
+  const out = document.getElementById("verifyresult");
+  try {
+    const v = await api("/v1/audit/verify");
+    out.innerHTML = v.ok
+      ? '<div class="banner ok"><span class="t">Chain verified.</span>' +
+        '<span class="d">' + esc(v.records) + " records, head <span class=\"mono\">" + esc(v.head) +
+        "</span>, signatures checked against <span class=\"mono\">" + shortHash(v.public_key) + "</span>.</span></div>"
+      : '<div class="banner bad"><span class="t">Chain broken.</span><span class="d">' + esc(v.error) + "</span></div>";
+  } catch (err) {
+    out.innerHTML = '<div class="banner bad"><span class="t">Could not verify.</span><span class="d">' +
+      esc(err.message) + "</span></div>";
+  }
+}
+
+/* --------------------------------------------------------------------------- */
+/* Shell                                                                        */
+/* --------------------------------------------------------------------------- */
+
+const RENDERERS = {
+  runs: renderRuns,
+  approvals: renderApprovals,
+  risk: renderRisk,
+  recon: renderRecon,
+  conformance: renderConformance,
+  audit: renderAudit
+};
+
+function setView(html) { document.getElementById("view").innerHTML = html; }
+
+function renderTabs() {
+  const nav = document.getElementById("tabs");
+  nav.innerHTML = TABS.map(function (t) {
+    const badge = t.id === "approvals" && state.pendingCount > 0
+      ? ' <span class="count alert">' + state.pendingCount + "</span>" : "";
+    return '<button role="tab" data-tab="' + t.id + '" aria-selected="' +
+      (state.tab === t.id) + '">' + esc(t.label) + badge + "</button>";
+  }).join("");
+  nav.querySelectorAll("[data-tab]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      state.tab = b.getAttribute("data-tab");
+      writeStored("tcrp.tab", state.tab);
+      renderTabs();
+      refresh();
+    });
+  });
+}
+
+async function refreshBuild() {
+  try {
+    const v = await api("/v1/version");
+    if (v.principals && v.principals.length) { state.principals = v.principals; renderPrincipals(); }
+    document.getElementById("buildline").innerHTML =
+      "<span><b>version</b> " + esc(v.version) + "</span>" +
+      "<span><b>env</b> " + esc(v.environment) + "</span>" +
+      "<span><b>model</b> " + esc(v.model) + "</span>" +
+      "<span><b>policy</b> " + esc(v.policy_bundle) + " " + shortHash(v.policy_digest) + "</span>" +
+      (v.deterministic ? "<span><b>clock</b> pinned</span>" : "");
+  } catch (err) {
+    document.getElementById("buildline").innerHTML =
+      '<span style="color:var(--bad)">build information unavailable</span>';
+  }
+}
+
+async function refreshPendingCount() {
+  try {
+    const a = await api("/v1/approvals");
+    state.pendingCount = a.count || 0;
+  } catch (err) { /* the badge is not worth a banner */ }
+  renderTabs();
+}
+
+async function refresh() {
+  if (state.busy) { return; }
+  state.busy = true;
+  try {
+    await RENDERERS[state.tab]();
+    if (state.tab !== "approvals") { await refreshPendingCount(); }
+    else { renderTabs(); }
+  } catch (err) {
+    if (err.message !== "unreachable") {
+      setView('<div class="banner bad"><span class="t">' + esc(err.code || "error") + "</span>" +
+        '<span class="d">' + esc(err.message) + "</span></div>");
+    }
+  } finally {
+    state.busy = false;
+  }
+}
+
+function renderPrincipals() {
+  const sel = document.getElementById("principal");
+  if (state.principals.indexOf(state.principal) < 0) { state.principal = state.principals[0]; }
+  sel.innerHTML = state.principals.map(function (p) {
+    return '<option value="' + esc(p) + '"' + (p === state.principal ? " selected" : "") + ">" + esc(p) + "</option>";
+  }).join("");
+}
+
+function boot() {
+  state.tab = readStored("tcrp.tab", "runs");
+  if (!RENDERERS[state.tab]) { state.tab = "runs"; }
+  renderPrincipals();
+  renderTabs();
+  document.getElementById("principal").addEventListener("change", function (e) {
+    state.principal = e.target.value;
+    writeStored("tcrp.principal", state.principal);
+    refresh();
+  });
+  document.getElementById("retry").addEventListener("click", function () {
+    refreshBuild();
+    refresh();
+  });
+  refreshBuild();
+  refresh();
+  state.timer = window.setInterval(refresh, POLL_MS);
+  state.tick = window.setInterval(tickExpiries, 1000);
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", boot);
+} else {
+  boot();
+}
+</script>
+</body>
+</html>

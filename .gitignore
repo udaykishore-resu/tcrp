@@ -1,0 +1,87 @@
+# Go build output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/tcrpd
+/bin/
+/dist/
+
+# Go tooling
+/vendor/
+go.work
+go.work.sum
+coverage.out
+coverage.html
+cpu.prof
+mem.prof
+*.pprof
+
+# Fuzzing corpora written by `go test -fuzz`. The seed corpus that ships with
+# the tests lives in testdata/fuzz and is tracked; this is the cache the
+# toolchain writes under GOCACHE-adjacent paths when it is redirected here.
+/testdata/fuzz/
+
+# Platform state. `platform.Options.Dir` holds the lake tables, the run and
+# approval JSON files and the audit log; an empty Dir uses a temp directory that
+# is removed with the process, but a named one persists and must never be
+# committed — it contains audit records and approval decisions.
+/state/
+/.tcrp/
+*.jsonl
+!bpmn/*.jsonl
+trace.json
+traces/
+evidence/
+*.bundle.json
+
+# Evaluation output
+eval-report.json
+eval-report.md
+drift-baseline.json
+drift-report.json
+
+# Foundry (contracts/), not built by this repository's CI
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+contracts/lib/
+
+# Daml (daml/), not built by this repository's CI
+daml/.daml/
+daml/dist/
+*.dar
+
+# Scala / sbt (spark/), not built by this repository's CI
+spark/target/
+spark/project/target/
+spark/project/project/
+.bsp/
+
+# Editors
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+\#*\#
+.\#*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets. Nothing in this repository reads a .env file, but an operator
+# following deploy/README.md will create one, and it will hold ANTHROPIC_API_KEY
+# and the Postgres password.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!deploy/**/*.example.key

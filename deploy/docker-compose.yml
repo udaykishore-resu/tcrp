@@ -1,0 +1,171 @@
+# TCRP — the platform, in one container.
+#
+#   docker compose -f deploy/docker-compose.yml up --build
+#   open http://127.0.0.1:8080
+#
+# This composition runs. `deploy/Dockerfile` builds `./cmd/tcrpd` and the image
+# starts the HTTP API and the governance dashboard.
+#
+# It is smaller than it used to be, and the two services that are gone are gone
+# because nothing in this repository can start them. Both are commented out at
+# the bottom of this file with what would be needed. Read that before assuming
+# the topology here is the intended one — it is not, it is the runnable subset
+# of it.
+
+name: tcrp
+
+services:
+  platform:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        VERSION: "${VERSION:-0.0.0-dev}"
+        COMMIT: "${COMMIT:-unknown}"
+        BUILT_AT: "${BUILT_AT:-unknown}"
+
+    # tcrpd is configured by flags, not by environment variables. Nothing in
+    # this repository reads TCRP_ADDR, TCRP_DIR, TCRP_ENVIRONMENT,
+    # TCRP_GUARD_URL, TCRP_POLICY, TCRP_MODEL, TCRP_DATABASE_URL or
+    # TCRP_SIGNING_SECRET; setting them here would be decoration. The only
+    # environment variables any code reads are ANTHROPIC_API_KEY and
+    # TCRP_MODEL_ID (internal/agent/anthropic.go) and TCRP_JUDGE_MODEL
+    # (internal/eval/judge.go), and only under --model=anthropic.
+    #
+    # --env development and --dev-auth are what make this composition usable
+    # from a browser. `--env production` is refused unless --dev-auth=false,
+    # and with dev auth off the only accepted credential is a signed
+    # X-TCRP-Principal assertion — which nothing here mints. See the caveats.
+    command:
+      - serve
+      - --addr=:8080
+      - --dir=/var/lib/tcrp
+      - --env=development
+      - --dev-auth=true
+      - --model=planner
+      - --log=info
+      - --policy=/etc/tcrp/policy/collateral-ops.json
+
+    environment:
+      # Only read under --model=anthropic, which is not the mode above. Left
+      # here so switching --model=anthropic is a one-line change.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+
+    volumes:
+      - tcrpstate:/var/lib/tcrp
+      # An override for the embedded policy bundle. The default is compiled into
+      # the binary with go:embed; this mounts the same file from the working
+      # tree so a rule change is one edit and one restart.
+      - ../internal/policy/bundles:/etc/tcrp/policy:ro
+
+    ports:
+      # Bound to the loopback address. There is no TLS and no real
+      # authentication; this must not be on a network anyone else can reach.
+      - "127.0.0.1:8080:8080"
+
+    read_only: true
+    user: "65532:65532"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+    # No `healthcheck:` key. The image has no shell, no curl and no `tcrpd
+    # healthcheck` subcommand, so every form Compose accepts here would fail
+    # with an exec error that reads like an application failure. GET /healthz
+    # and GET /readyz are served unauthenticated and return 200 — probe them
+    # from outside, or from a sidecar that has a shell. Kubernetes does this
+    # properly with httpGet probes; see deploy/k8s/deployment.yaml.
+
+    restart: unless-stopped
+
+volumes:
+  tcrpstate:
+
+# ---------------------------------------------------------------------------
+# The two services that are not here
+# ---------------------------------------------------------------------------
+#
+# THE STANDALONE GUARDRAIL.
+#
+# guard.Inspector is the interface; guard.Engine implements it in-process and
+# guard.Client implements it over HTTP against guard.Handler, which serves
+# POST /v1/inspect, GET /v1/healthz and GET /v1/config. Which one the platform
+# uses is a wiring decision — `tcrpd serve --guard-url http://guard:8081` — and
+# not a code change. See docs/adr/0003-guardrail-transport-and-fail-modes.md.
+#
+# What is missing is a binary that serves guard.Handler. tcrpd has no `guard`
+# subcommand (its subcommands are demo, serve, ask, eval, conform, version) and
+# there is no cmd/guardd. Until one exists this is a property of the code and
+# not a running process, and the honest thing is to say so rather than ship a
+# service definition that exits immediately:
+#
+#   guard:
+#     build: { context: .., dockerfile: deploy/Dockerfile }
+#     command: ["guard", "--addr", ":8081"]   # no such subcommand
+#     networks: [internal]
+#     read_only: true
+#     user: "65532:65532"
+#     security_opt: ["no-new-privileges:true"]
+#     cap_drop: ["ALL"]
+#
+# ...and then `--guard-url=http://guard:8081` on the platform's command. It
+# would deliberately have no egress: the detectors are pure functions of text,
+# and a guardrail that needs the network is a guardrail that is off during an
+# incident.
+#
+# POSTGRES.
+#
+# migrations/ holds a real schema whose constraints enforce four-eyes and the
+# append-only audit chain in the database rather than only in application code,
+# and it is worth reading. But no Go file in this repository imports
+# database/sql or opens a connection: the run and approval store is on disk
+# under --dir, and the audit log is a file. A postgres service here would start,
+# apply the migrations through initdb, and then sit unused while the platform
+# wrote JSON to a volume — which looks like persistence and is not.
+#
+# When a Postgres-backed store lands, the service is unremarkable:
+#
+#   postgres:
+#     image: postgres:16-alpine
+#     environment:
+#       POSTGRES_DB: tcrp
+#       POSTGRES_USER: tcrp
+#       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+#       POSTGRES_INITDB_ARGS: "--data-checksums"
+#     volumes:
+#       - pgdata:/var/lib/postgresql/data
+#       - ../migrations:/docker-entrypoint-initdb.d:ro
+#     healthcheck:
+#       test: ["CMD-SHELL", "pg_isready -U tcrp -d tcrp"]
+#
+# ...noting that initdb applies migrations in lexical order ON FIRST START ONLY,
+# on an empty volume. That is fine for a demo composition and is not a migration
+# strategy.
+
+# ---------------------------------------------------------------------------
+# What is deliberately not production-ready here
+# ---------------------------------------------------------------------------
+#
+# - No TLS. The platform's port is plaintext HTTP, bound to 127.0.0.1 so that at
+#   least it is not on the network.
+# - Development authentication. `--dev-auth=true` means the X-TCRP-As header
+#   names the acting principal with nothing to prove it: any caller can be the
+#   treasurer. That is the point of the flag and the reason `--env=production`
+#   refuses to start with it on.
+# - No production authentication either. With --dev-auth=false the server
+#   accepts only a signed X-TCRP-Principal assertion, and the signer's HMAC
+#   secret is the compile-time literal "tcrp-dev-signing-key"
+#   (internal/platform/platform.go). Whoever knows it can assert any principal.
+#   There is no issuing endpoint and no rotation.
+# - In-memory and on-disk state, one replica. Runs, approvals and the audit log
+#   live under /var/lib/tcrp in a named volume. A run paused on an approval gate
+#   survives a restart of this container and does not survive `docker compose
+#   down -v`.
+# - The audit signing key and the bridge signer keys are generated fresh in
+#   ed25519.GenerateKey at every startup (internal/platform/platform.go), so a
+#   chain signed by one process cannot be verified by the next one.
+# - One replica, so the risk engine's Elector is never exercised — see
+#   docs/runbook.md#failover.
+# - No log aggregation, no metric scrape, no trace collector. /metrics is served
+#   and nothing reads it.

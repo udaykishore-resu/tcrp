@@ -1,0 +1,291 @@
+-- Copyright (c) 2026 the tcrp authors. Apache-2.0.
+--
+-- Daml Script scenarios for Collateral.Fund.
+--
+-- The scenario that matters most is testSelectiveDisclosure. Everything else
+-- here checks that the arithmetic and the controllers are right; that one
+-- checks the property the whole choice of Canton rests on, which is that a
+-- holder of the fund cannot see another holder's position.
+module Test.Fund where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Optional (isNone, isSome)
+
+import Collateral.Fund
+
+symbol : Text
+symbol = "TMMF"
+
+data Parties = Parties
+  with
+    issuer : Party
+    alpha : Party
+    bravo : Party
+    charlie : Party
+    vault : Party
+
+setupParties : Script Parties
+setupParties = do
+  issuer <- allocatePartyWithHint "Issuer" (PartyIdHint "Issuer")
+  alpha <- allocatePartyWithHint "Alpha" (PartyIdHint "Alpha")
+  bravo <- allocatePartyWithHint "Bravo" (PartyIdHint "Bravo")
+  charlie <- allocatePartyWithHint "Charlie" (PartyIdHint "Charlie")
+  vault <- allocatePartyWithHint "BridgeVault" (PartyIdHint "BridgeVault")
+  pure Parties with issuer, alpha, bravo, charlie, vault
+
+setupIssuance : Script (Parties, ContractId FundIssuance)
+setupIssuance = do
+  p <- setupParties
+  issuance <- submit p.issuer do
+    createCmd FundIssuance with
+      issuer = p.issuer
+      symbol = symbol
+      name = "Tokenised USD Money Market Fund Share"
+  pure (p, issuance)
+
+balanceOf : Party -> Party -> Party -> Script Int
+balanceOf reader issuer owner = do
+  holdings <- query @FundShare reader
+  pure $ sum [h.quantity | (_, h) <- holdings, h.owner == owner, h.issuer == issuer]
+
+-- | The disclosure test. Alpha and Bravo both hold the fund; neither can see
+-- the other's holding, and the issuer sees both because it signed both.
+testSelectiveDisclosure : Script ()
+testSelectiveDisclosure = do
+  (p, issuance) <- setupIssuance
+
+  alphaCid <- submit p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = 40_000_000
+  bravoCid <- submit p.issuer do exerciseCmd issuance Issue with holder = p.bravo, amount = 65_000_000
+
+  -- Each holder sees exactly one contract: its own.
+  alphaSees <- query @FundShare p.alpha
+  length alphaSees === 1
+  bravoSees <- query @FundShare p.bravo
+  length bravoSees === 1
+
+  -- A direct read of another party's holding returns nothing at all. The
+  -- contract is not redacted for Charlie; as far as Charlie's participant is
+  -- concerned it does not exist.
+  alphaFromBravo <- queryContractId p.bravo alphaCid
+  assertMsg "Bravo can see Alpha's holding" (isNone alphaFromBravo)
+  bravoFromAlpha <- queryContractId p.alpha bravoCid
+  assertMsg "Alpha can see Bravo's holding" (isNone bravoFromAlpha)
+
+  -- Charlie holds nothing and is a stakeholder in nothing, so it sees nothing.
+  charlieSees <- query @FundShare p.charlie
+  length charlieSees === 0
+  charlieOnAlpha <- queryContractId p.charlie alphaCid
+  assertMsg "an unrelated party can see a holding" (isNone charlieOnAlpha)
+
+  -- The issuer signs every holding and therefore sees every holding. That is
+  -- not a privilege bolted on; it follows from being a signatory.
+  issuerSees <- query @FundShare p.issuer
+  length issuerSees === 2
+  issuerOnAlpha <- queryContractId p.issuer alphaCid
+  assertMsg "the issuer cannot see a holding it signed" (isSome issuerOnAlpha)
+
+-- | A pledge discloses the collateral to the pledgee and to nobody else.
+testPledgeDisclosure : Script ()
+testPledgeDisclosure = do
+  (p, issuance) <- setupIssuance
+  _ <- submit p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = 1_000_000
+
+  (_, pledgeCid) <- submit p.alpha do
+    exerciseByKeyCmd @FundShare (p.issuer, symbol, p.alpha) PledgeShares with
+      pledgee = p.bravo
+      amount = 600_000
+      reference = "repo NS-ALPHA-1"
+
+  seenByPledgee <- queryContractId p.bravo pledgeCid
+  assertMsg "the pledgee cannot see the collateral it holds" (isSome seenByPledgee)
+  seenByStranger <- queryContractId p.charlie pledgeCid
+  assertMsg "an unrelated party can see the pledge" (isNone seenByStranger)
+
+  -- Only the pledgee may release.
+  submitMustFail p.alpha do exerciseCmd pledgeCid Release
+  released <- submit p.bravo do exerciseCmd pledgeCid Release
+  holding <- queryContractId p.alpha released
+  assertMsg "the released holding did not come back to its owner" (isSome holding)
+  back <- balanceOf p.alpha p.issuer p.alpha
+  back === 1_000_000
+
+-- | Archive and recreate: a transfer leaves the source holding archived and two
+-- new holdings in its place.
+testTransferArchivesAndRecreates : Script ()
+testTransferArchivesAndRecreates = do
+  (p, issuance) <- setupIssuance
+  original <- submit p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = 1_000
+
+  (remainder, _) <- submit p.alpha do
+    exerciseCmd original Transfer with recipient = p.bravo, amount = 400
+
+  gone <- queryContractId p.issuer original
+  assertMsg "the source holding was not archived" (isNone gone)
+  assertMsg "no remainder was created" (isSome remainder)
+
+  alphaBalance <- balanceOf p.alpha p.issuer p.alpha
+  alphaBalance === 600
+  bravoBalance <- balanceOf p.bravo p.issuer p.bravo
+  bravoBalance === 400
+
+  -- Only the owner may transfer.
+  submitMustFail p.bravo do
+    exerciseByKeyCmd @FundShare (p.issuer, symbol, p.alpha) Transfer with recipient = p.bravo, amount = 1
+
+-- | A transfer of the whole holding leaves no remainder, because a holding of
+-- zero shares is refused by the ensure clause rather than left lying around.
+testFullTransferLeavesNoRemainder : Script ()
+testFullTransferLeavesNoRemainder = do
+  (p, issuance) <- setupIssuance
+  original <- submit p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = 500
+
+  (remainder, _) <- submit p.alpha do
+    exerciseCmd original Transfer with recipient = p.bravo, amount = 500
+  assertMsg "an empty remainder was created" (isNone remainder)
+  alphaSees <- query @FundShare p.alpha
+  length alphaSees === 0
+
+-- | Propose-accept: nothing lands in a party's portfolio without that party
+-- exercising a choice.
+testProposeAccept : Script ()
+testProposeAccept = do
+  (p, issuance) <- setupIssuance
+  original <- submit p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = 1_000
+
+  (_, proposal) <- submit p.alpha do
+    exerciseCmd original ProposeTransfer with recipient = p.bravo, amount = 300
+
+  -- The units have left the sender already, so they cannot be offered twice.
+  alphaBalance <- balanceOf p.alpha p.issuer p.alpha
+  alphaBalance === 700
+  bravoBalance <- balanceOf p.bravo p.issuer p.bravo
+  bravoBalance === 0
+
+  -- The recipient can see the offer; a third party cannot.
+  seen <- queryContractId p.bravo proposal
+  assertMsg "the recipient cannot see the proposal" (isSome seen)
+  unseen <- queryContractId p.charlie proposal
+  assertMsg "a third party can see the proposal" (isNone unseen)
+
+  -- Only the recipient may accept.
+  submitMustFail p.charlie do exerciseCmd proposal Accept
+  submitMustFail p.alpha do exerciseCmd proposal Accept
+
+  _ <- submit p.bravo do exerciseCmd proposal Accept
+  afterBravo <- balanceOf p.bravo p.issuer p.bravo
+  afterBravo === 300
+
+  -- The proposal is archived; accepting twice is impossible.
+  submitMustFail p.bravo do exerciseCmd proposal Accept
+
+-- | Rejecting and withdrawing both return the units to the sender.
+testProposalCanBeRejectedAndWithdrawn : Script ()
+testProposalCanBeRejectedAndWithdrawn = do
+  (p, issuance) <- setupIssuance
+  original <- submit p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = 1_000
+
+  (_, rejected) <- submit p.alpha do
+    exerciseCmd original ProposeTransfer with recipient = p.bravo, amount = 200
+  _ <- submit p.bravo do exerciseCmd rejected Reject
+  afterReject <- balanceOf p.alpha p.issuer p.alpha
+  afterReject === 1_000
+
+  (_, withdrawn) <- submit p.alpha do
+    exerciseByKeyCmd @FundShare (p.issuer, symbol, p.alpha) ProposeTransfer with
+      recipient = p.bravo
+      amount = 200
+  submitMustFail p.charlie do exerciseCmd withdrawn Withdraw
+  _ <- submit p.alpha do exerciseCmd withdrawn Withdraw
+  afterWithdraw <- balanceOf p.alpha p.issuer p.alpha
+  afterWithdraw === 1_000
+
+-- | The ensure clauses and the assertion messages are the contract's own
+-- validation, and they are what a caller sees when it gets something wrong.
+testEnsureAndAssertions : Script ()
+testEnsureAndAssertions = do
+  (p, issuance) <- setupIssuance
+
+  -- A holding of zero or fewer shares cannot be created.
+  submitMustFail p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = 0
+  submitMustFail p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = -1
+
+  original <- submit p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = 100
+  -- More than the holding.
+  submitMustFail p.alpha do exerciseCmd original Transfer with recipient = p.bravo, amount = 101
+  -- To itself.
+  submitMustFail p.alpha do exerciseCmd original Transfer with recipient = p.alpha, amount = 1
+  -- Only the issuer redeems.
+  submitMustFail p.alpha do exerciseCmd original Redeem with amount = 1
+
+-- | Redemption retires shares and leaves no holding when it takes all of them.
+testRedeem : Script ()
+testRedeem = do
+  (p, issuance) <- setupIssuance
+  original <- submit p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = 1_000
+
+  remainder <- submit p.issuer do exerciseCmd original Redeem with amount = 400
+  assertMsg "no remainder after a partial redemption" (isSome remainder)
+  afterPartial <- balanceOf p.alpha p.issuer p.alpha
+  afterPartial === 600
+
+  emptied <- submit p.issuer do
+    exerciseByKeyCmd @FundShare (p.issuer, symbol, p.alpha) Redeem with amount = 600
+  assertMsg "a remainder survived a full redemption" (isNone emptied)
+  afterFull <- balanceOf p.issuer p.issuer p.alpha
+  afterFull === 0
+
+-- | The bridge leg: lock into the vault party, then unlock back. Locking moves
+-- units between parties and does not change how many exist, which is the
+-- property the cross-network supply control depends on.
+testBridgeLockAndUnlock : Script ()
+testBridgeLockAndUnlock = do
+  (p, issuance) <- setupIssuance
+  original <- submit p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = 1_000
+
+  -- Only the issuer operates the bridge.
+  submitMustFail p.alpha do
+    exerciseCmd original BridgeLock with vault = p.vault, amount = 400, nonce = 1
+
+  (remainder, locked) <- submit p.issuer do
+    exerciseCmd original BridgeLock with vault = p.vault, amount = 400, nonce = 1
+  assertMsg "no remainder after a partial lock" (isSome remainder)
+
+  vaultBalance <- balanceOf p.vault p.issuer p.vault
+  vaultBalance === 400
+  holderBalance <- balanceOf p.alpha p.issuer p.alpha
+  holderBalance === 600
+
+  -- The vault sees what it custodies and nothing else.
+  vaultSees <- query @FundShare p.vault
+  length vaultSees === 1
+  lockedFromAlpha <- queryContractId p.alpha locked
+  assertMsg "the holder can still see units it no longer owns" (isNone lockedFromAlpha)
+
+  _ <- submit p.issuer do
+    exerciseCmd issuance BridgeUnlock with vault = p.vault, holder = p.alpha, amount = 400, nonce = 1
+  afterUnlock <- balanceOf p.alpha p.issuer p.alpha
+  afterUnlock === 1_000
+  vaultAfter <- balanceOf p.vault p.issuer p.vault
+  vaultAfter === 0
+
+  -- More than is locked cannot be released.
+  submitMustFail p.issuer do
+    exerciseCmd issuance BridgeUnlock with vault = p.vault, holder = p.alpha, amount = 1, nonce = 2
+
+-- | Enforcement on a default needs both parties. A unilateral seizure is a
+-- dispute, not a settlement.
+testEnforceNeedsBothParties : Script ()
+testEnforceNeedsBothParties = do
+  (p, issuance) <- setupIssuance
+  _ <- submit p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = 1_000
+  (_, pledgeCid) <- submit p.alpha do
+    exerciseByKeyCmd @FundShare (p.issuer, symbol, p.alpha) PledgeShares with
+      pledgee = p.bravo
+      amount = 600
+      reference = "repo NS-ALPHA-1"
+
+  submitMustFail p.bravo do exerciseCmd pledgeCid Enforce
+  _ <- submitMulti [p.bravo, p.alpha] [] do exerciseCmd pledgeCid Enforce
+  pledgeeBalance <- balanceOf p.bravo p.issuer p.bravo
+  pledgeeBalance === 600

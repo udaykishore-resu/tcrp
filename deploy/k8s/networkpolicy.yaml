@@ -1,0 +1,248 @@
+# Default-deny egress, with the model API as the only exception.
+#
+# The reasoning is in docs/threat-model.md section 7 (exfiltration through tool
+# arguments) and section 8 (model substitution). The platform makes exactly one
+# outbound call: to the model API, and only when `--model=anthropic`. The
+# deterministic planner — the default — makes none at all.
+#
+# So the correct egress policy is default-deny with a single named exception,
+# and that is what this is. It is also the control that most directly limits the
+# blast radius of a prompt injection that persuades the agent to send data
+# somewhere: there is nowhere else to send it.
+#
+# NOTE: NetworkPolicy is enforced by the CNI. On a cluster without a policy-
+# capable CNI (Calico, Cilium, or equivalent) these objects are accepted by the
+# API server and enforce NOTHING. Verify before relying on any of it.
+
+# ---------------------------------------------------------------------------
+# 1. Deny everything, both directions, for every pod in the namespace.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: tcrp
+  labels:
+    app.kubernetes.io/name: tcrp
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  # No rules. An empty ingress and egress list denies everything; the policies
+  # below add back exactly what is needed. Ordering does not matter —
+  # NetworkPolicies are additive and a connection is permitted if any policy
+  # allows it — so this object is the floor and every other object is an
+  # exception to it.
+---
+# ---------------------------------------------------------------------------
+# 2. DNS. Everything else needs it.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: tcrp
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+# ---------------------------------------------------------------------------
+# 3. Platform ingress: the ingress controller, and Prometheus.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-ingress
+  namespace: tcrp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tcrp
+      app.kubernetes.io/component: platform
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - {protocol: TCP, port: 8080}
+    # The scrape. /metrics, /healthz and /readyz sit outside authentication by
+    # design, so this rule is the only thing keeping them off the rest of the
+    # cluster — /metrics carries tcrp_risk_open_breaches,
+    # tcrp_lake_recon_breaks_open and tcrp_bridge_supply_delta, which describe
+    # the institution's positions.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - {protocol: TCP, port: 8080}
+---
+# ---------------------------------------------------------------------------
+# 4. Guardrail ingress: the platform only.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: guard-ingress
+  namespace: tcrp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tcrp
+      app.kubernetes.io/component: guard
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tcrp
+              app.kubernetes.io/component: platform
+      ports:
+        - {protocol: TCP, port: 8081}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - {protocol: TCP, port: 8081}
+---
+# ---------------------------------------------------------------------------
+# 5. Platform → guardrail.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-egress-guard
+  namespace: tcrp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tcrp
+      app.kubernetes.io/component: platform
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tcrp
+              app.kubernetes.io/component: guard
+      ports:
+        - {protocol: TCP, port: 8081}
+---
+# ---------------------------------------------------------------------------
+# 6. Platform → Postgres.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-egress-postgres
+  namespace: tcrp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tcrp
+      app.kubernetes.io/component: platform
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - {protocol: TCP, port: 5432}
+---
+# ---------------------------------------------------------------------------
+# 7. THE ONE EXCEPTION: platform → the model API.
+# ---------------------------------------------------------------------------
+# This is the only rule in this file that permits a connection leaving the
+# cluster, and it is the only one the platform needs.
+#
+# The ipBlock is a blunt instrument and is the honest weakness here.
+# NetworkPolicy cannot express "api.anthropic.com" — it works on CIDRs, and the
+# API is behind a CDN whose address ranges change. Three options, in descending
+# order of correctness:
+#
+#   1. An egress gateway or a service mesh with hostname-based policy (Cilium's
+#      toFQDNs, Istio's ServiceEntry with a sidecar-enforced allowlist). This is
+#      the right answer and it is a cluster-level dependency, so it is not
+#      assumed here.
+#   2. An explicit forward proxy the platform is configured to use, with the
+#      allowlist in the proxy. Egress then permits only the proxy.
+#   3. The CIDR block below, which permits more than intended.
+#
+# Whichever is chosen, the property being defended is the one in
+# docs/threat-model.md section 7: tool arguments and prompts are the data that
+# crosses this boundary, and narrowing the destination narrows what an injection
+# can accomplish.
+#
+# This rule is also unnecessary when `--model=planner`, which is the default
+# and which makes no outbound call at all. Omit it entirely unless the
+# Anthropic model is actually in use.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-egress-model-api
+  namespace: tcrp
+  annotations:
+    tcrp.io/note: |
+      Remove this policy when `--model=planner`. The deterministic planner
+      makes no network call, and an unused egress exception is an unused
+      egress exception.
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: tcrp
+      app.kubernetes.io/component: platform
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              # Never let egress reach the cluster's own networks, the node
+              # network, or the cloud metadata service. The last one is the
+              # important entry: 169.254.169.254 is how a compromised workload
+              # obtains cloud credentials, and it is inside 0.0.0.0/0.
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+      ports:
+        - {protocol: TCP, port: 443}
+
+# ---------------------------------------------------------------------------
+# What has no egress at all, and should not
+# ---------------------------------------------------------------------------
+#
+# The GUARDRAIL. Its detectors are deterministic and pure functions of text —
+# PII patterns, secret patterns, an injection scorer, an ungrounded-number
+# detector, a domain detector — and none of them needs the network. The
+# model-backed Classifier stage is optional, runs last inside whatever budget
+# remains, and is explicitly the disposable stage; ADR 0003 makes the argument
+# that a guardrail which cannot run without a network round trip is a guardrail
+# that is off during an incident. Giving it egress would contradict that.
+#
+# If a Classifier is ever installed, it needs its own narrow egress rule, and
+# installing it should be a deliberate decision with the budget consequences
+# understood — see docs/runbook.md, "the guardrail budget is being exceeded".
+#
+# POSTGRES. It is a destination, never a source.

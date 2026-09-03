@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  id="tcrp-bridge"
+                  targetNamespace="https://tcrp.example/bpmn">
+  <bpmn:process id="tcrp-bridge-lock-and-mint" name="Cross-network lock and mint" isExecutable="true">
+
+    <bpmn:startEvent id="Start_Instruction" name="Cross-network transfer instructed">
+      <bpmn:outgoing>Flow_Start_Authorise</bpmn:outgoing>
+    </bpmn:startEvent>
+
+    <bpmn:userTask id="Task_Authorise" name="Authorize the cross-network transfer">
+      <bpmn:incoming>Flow_Start_Authorise</bpmn:incoming>
+      <bpmn:outgoing>Flow_Authorise_Lock</bpmn:outgoing>
+    </bpmn:userTask>
+
+    <bpmn:serviceTask id="Task_LockOnEVM" name="Lock units in the EVM bridge vault">
+      <bpmn:incoming>Flow_Authorise_Lock</bpmn:incoming>
+      <bpmn:outgoing>Flow_Lock_Finality</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:intermediateCatchEvent id="Event_Finality" name="Wait for source finality">
+      <bpmn:incoming>Flow_Lock_Finality</bpmn:incoming>
+      <bpmn:outgoing>Flow_Finality_Attest</bpmn:outgoing>
+    </bpmn:intermediateCatchEvent>
+
+    <bpmn:serviceTask id="Task_Attest" name="Collect M-of-N attestations">
+      <bpmn:incoming>Flow_Finality_Attest</bpmn:incoming>
+      <bpmn:outgoing>Flow_Attest_Gateway</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:exclusiveGateway id="Gateway_Quorum" name="Quorum met?">
+      <bpmn:incoming>Flow_Attest_Gateway</bpmn:incoming>
+      <bpmn:outgoing>Flow_Gateway_Mint</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Gateway_Held</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:serviceTask id="Task_MintOnCanton" name="Mint units on Canton">
+      <bpmn:incoming>Flow_Gateway_Mint</bpmn:incoming>
+      <bpmn:outgoing>Flow_Mint_Reconcile</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="Task_ReconcileSupply" name="Reconcile cross-network supply">
+      <bpmn:incoming>Flow_Mint_Reconcile</bpmn:incoming>
+      <bpmn:outgoing>Flow_Reconcile_Registry</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="Task_CheckRegistry" name="Check holders against the identity registry">
+      <bpmn:incoming>Flow_Reconcile_Registry</bpmn:incoming>
+      <bpmn:outgoing>Flow_Registry_Publish</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="Task_PublishTables" name="Publish the lakehouse tables">
+      <bpmn:incoming>Flow_Registry_Publish</bpmn:incoming>
+      <bpmn:outgoing>Flow_Publish_Done</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="End_Bridged" name="Units bridged and reconciled">
+      <bpmn:incoming>Flow_Publish_Done</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:endEvent id="End_Held" name="Held for the operator">
+      <bpmn:incoming>Flow_Gateway_Held</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:sequenceFlow id="Flow_Start_Authorise"   sourceRef="Start_Instruction"    targetRef="Task_Authorise" />
+    <bpmn:sequenceFlow id="Flow_Authorise_Lock"    sourceRef="Task_Authorise"       targetRef="Task_LockOnEVM" />
+    <bpmn:sequenceFlow id="Flow_Lock_Finality"     sourceRef="Task_LockOnEVM"       targetRef="Event_Finality" />
+    <bpmn:sequenceFlow id="Flow_Finality_Attest"   sourceRef="Event_Finality"       targetRef="Task_Attest" />
+    <bpmn:sequenceFlow id="Flow_Attest_Gateway"    sourceRef="Task_Attest"          targetRef="Gateway_Quorum" />
+    <bpmn:sequenceFlow id="Flow_Gateway_Mint"  name="quorum"    sourceRef="Gateway_Quorum" targetRef="Task_MintOnCanton" />
+    <bpmn:sequenceFlow id="Flow_Gateway_Held"  name="no quorum" sourceRef="Gateway_Quorum" targetRef="End_Held" />
+    <bpmn:sequenceFlow id="Flow_Mint_Reconcile"    sourceRef="Task_MintOnCanton"    targetRef="Task_ReconcileSupply" />
+    <bpmn:sequenceFlow id="Flow_Reconcile_Registry" sourceRef="Task_ReconcileSupply" targetRef="Task_CheckRegistry" />
+    <bpmn:sequenceFlow id="Flow_Registry_Publish"  sourceRef="Task_CheckRegistry"   targetRef="Task_PublishTables" />
+    <bpmn:sequenceFlow id="Flow_Publish_Done"      sourceRef="Task_PublishTables"   targetRef="End_Bridged" />
+
+    <bpmn:textAnnotation id="Note_Authorise">
+      <bpmn:text>@control four-eyes
+@invariant AGENT-1 no money-movement tool invocation without a granted approval from someone other than the requester
+@evidence audit:approval.granted</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Authorise" sourceRef="Task_Authorise" targetRef="Note_Authorise" />
+
+    <bpmn:textAnnotation id="Note_Lock">
+      <bpmn:text>@tier money_movement
+@evidence audit:bridge.locked
+@evidence ledger:evm</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Lock" sourceRef="Task_LockOnEVM" targetRef="Note_Lock" />
+
+    <bpmn:textAnnotation id="Note_Finality">
+      <bpmn:text>A lock is not evidence until the block carrying it is final.
+@evidence ledger:evm</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Finality" sourceRef="Event_Finality" targetRef="Note_Finality" />
+
+    <bpmn:textAnnotation id="Note_Attest">
+      <bpmn:text>@control m-of-n
+@invariant SETTLE-3 every bridge mint carries a quorum attestation and a matching source lock
+@evidence bridge:attestation</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Attest" sourceRef="Task_Attest" targetRef="Note_Attest" />
+
+    <bpmn:textAnnotation id="Note_Mint">
+      <bpmn:text>@tier money_movement
+@control replay-protection
+@invariant SETTLE-4 no bridge nonce is minted twice
+@evidence audit:bridge.minted
+@evidence ledger:canton</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Mint" sourceRef="Task_MintOnCanton" targetRef="Note_Mint" />
+
+    <bpmn:textAnnotation id="Note_Reconcile">
+      <bpmn:text>@control supply-reconciliation
+@invariant SETTLE-1 supply is conserved across the bridge
+@invariant SETTLE-5 circulating supply equals issuance less redemptions
+@evidence bridge:supply</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Reconcile" sourceRef="Task_ReconcileSupply" targetRef="Note_Reconcile" />
+
+    <bpmn:textAnnotation id="Note_Registry">
+      <bpmn:text>@control identity-registry
+@invariant SETTLE-2 no token holder sits outside the identity registry on either ledger
+@evidence ledger:evm
+@evidence ledger:canton</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Registry" sourceRef="Task_CheckRegistry" targetRef="Note_Registry" />
+
+    <bpmn:textAnnotation id="Note_Publish">
+      <bpmn:text>@control lineage
+@invariant DATA-1 every gold row traces to a bronze event
+@evidence lake:gold</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Publish" sourceRef="Task_PublishTables" targetRef="Note_Publish" />
+
+  </bpmn:process>
+</bpmn:definitions>
