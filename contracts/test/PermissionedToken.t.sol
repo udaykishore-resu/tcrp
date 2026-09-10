@@ -83,24 +83,31 @@ contract PermissionedTokenTest is Fixture {
 
     // --- roles ------------------------------------------------------------
 
+    // The role getters are external calls, so they are read into locals first:
+    // a vm.prank applies to the next external call, and a getter evaluated
+    // inside the expectRevert arguments would consume it.
     function test_mintRequiresAgentRole() public {
+        bytes32 agentRole = token.AGENT_ROLE();
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(AccessControl.MissingRole.selector, token.AGENT_ROLE(), alice));
+        vm.expectRevert(abi.encodeWithSelector(AccessControl.MissingRole.selector, agentRole, alice));
         token.mint(alice, 1, "");
     }
 
     function test_pauseRequiresOwnerRole() public {
+        bytes32 agentRole = token.AGENT_ROLE();
+        bytes32 ownerRole = token.OWNER_ROLE();
         vm.prank(owner);
-        token.grantRole(token.AGENT_ROLE(), alice);
+        token.grantRole(agentRole, alice);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(AccessControl.MissingRole.selector, token.OWNER_ROLE(), alice));
+        vm.expectRevert(abi.encodeWithSelector(AccessControl.MissingRole.selector, ownerRole, alice));
         token.pause();
     }
 
     function test_lastOwnerCannotBeRevoked() public {
+        bytes32 ownerRole = token.OWNER_ROLE();
         vm.prank(owner);
         vm.expectRevert(AccessControl.LastOwner.selector);
-        token.revokeRole(token.OWNER_ROLE(), owner);
+        token.revokeRole(ownerRole, owner);
     }
 
     // --- lifecycle --------------------------------------------------------

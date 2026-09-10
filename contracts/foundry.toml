@@ -9,7 +9,7 @@ optimizer = true
 optimizer_runs = 200
 # Compiler warnings are errors. A permissioned token is not a place to leave a
 # shadowed variable or an unused return value to be looked at later.
-deny_warnings = true
+deny = "warnings"
 # Named-key mapping syntax and custom errors both need a modern compiler; pin it
 # rather than letting whatever is installed decide what the source means.
 via_ir = false
@@ -24,6 +24,14 @@ depth = 64
 fail_on_revert = false
 call_override = false
 shrink_run_limit = 5000
+
+[lint]
+# forge lint runs as part of `forge build` and, under `deny = "warnings"`, a
+# lint warning fails the build. The tests deliberately call `transfer` without
+# checking the return value: every one of those calls is either wrapped in
+# vm.expectRevert or asserted through balances afterwards, so the
+# erc20-unchecked-transfer rule has nothing to say about them.
+ignore = ["test/**/*.sol"]
 
 [fmt]
 line_length = 120

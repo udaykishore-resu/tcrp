@@ -69,7 +69,13 @@ contract PermissionedToken is AccessControl, Pausable, IERC20 {
     error ComplianceRejected(string reason);
     error NotVault(address caller);
 
-    constructor(string memory name_, string memory symbol_, address owner_, IIdentityRegistry registry_, ICompliance compliance_) {
+    constructor(
+        string memory name_,
+        string memory symbol_,
+        address owner_,
+        IIdentityRegistry registry_,
+        ICompliance compliance_
+    ) {
         if (owner_ == address(0) || address(registry_) == address(0) || address(compliance_) == address(0)) {
             revert ZeroAddress();
         }

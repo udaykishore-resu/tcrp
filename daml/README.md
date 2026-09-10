@@ -30,6 +30,7 @@ match its path and `test.Fund` is not a legal module name.
 | `FundShare` | issuer | holder | The holding. Keyed by `(issuer, symbol, owner)`, so a balance change is an archive and a create. |
 | `TransferProposal` | issuer | owner, recipient | The propose-accept pair: nothing lands in a portfolio without the recipient exercising a choice. |
 | `Pledge` | issuer | owner, pledgee | Collateral. The pledgee observes what it holds and can release it; it cannot move it anywhere else. |
+| `ShareReturn` | issuer | owner | Shares coming back after a `Reject` or a `Release`. The counterparty cannot see the owner's holding, so it cannot merge into it; the owner does that with `Claim`. |
 | `FundIssuance` | issuer | — | Standing authority to issue, so the transaction tree records which authority created a holding. |
 
 Every template carries an `ensure` clause and every choice asserts its

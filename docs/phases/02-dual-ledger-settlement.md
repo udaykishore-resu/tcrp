@@ -123,7 +123,7 @@ The Solidity and Daml, **only where those toolchains exist** — nothing in this
 repository's Go build compiles or runs them:
 
 ```sh
-cd contracts && forge install foundry-rs/forge-std --no-commit && forge test -vvv
+cd contracts && forge install foundry-rs/forge-std && forge test -vvv
 cd daml     && daml build && daml test
 ```
 

@@ -14,8 +14,10 @@ import DA.Optional (isNone, isSome)
 
 import Collateral.Fund
 
-symbol : Text
-symbol = "TMMF"
+-- Not called `symbol`: that name is also a record field on the templates in
+-- Collateral.Fund, and a top-level binding with the same name is ambiguous.
+fundSymbol : Text
+fundSymbol = "TMMF"
 
 data Parties = Parties
   with
@@ -40,7 +42,7 @@ setupIssuance = do
   issuance <- submit p.issuer do
     createCmd FundIssuance with
       issuer = p.issuer
-      symbol = symbol
+      symbol = fundSymbol
       name = "Tokenised USD Money Market Fund Share"
   pure (p, issuance)
 
@@ -92,7 +94,7 @@ testPledgeDisclosure = do
   _ <- submit p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = 1_000_000
 
   (_, pledgeCid) <- submit p.alpha do
-    exerciseByKeyCmd @FundShare (p.issuer, symbol, p.alpha) PledgeShares with
+    exerciseByKeyCmd @FundShare (p.issuer, fundSymbol, p.alpha) PledgeShares with
       pledgee = p.bravo
       amount = 600_000
       reference = "repo NS-ALPHA-1"
@@ -102,9 +104,15 @@ testPledgeDisclosure = do
   seenByStranger <- queryContractId p.charlie pledgeCid
   assertMsg "an unrelated party can see the pledge" (isNone seenByStranger)
 
-  -- Only the pledgee may release.
+  -- Only the pledgee may release. The release comes back as a ShareReturn the
+  -- owner claims, because the pledgee cannot see the owner's holding.
   submitMustFail p.alpha do exerciseCmd pledgeCid Release
-  released <- submit p.bravo do exerciseCmd pledgeCid Release
+  returned <- submit p.bravo do exerciseCmd pledgeCid Release
+  seenByOwner <- queryContractId p.alpha returned
+  assertMsg "the owner cannot see the return of its own collateral" (isSome seenByOwner)
+  seenByPledgeeAfter <- queryContractId p.bravo returned
+  assertMsg "the pledgee can see the owner's returned shares" (isNone seenByPledgeeAfter)
+  released <- submit p.alpha do exerciseCmd returned Claim
   holding <- queryContractId p.alpha released
   assertMsg "the released holding did not come back to its owner" (isSome holding)
   back <- balanceOf p.alpha p.issuer p.alpha
@@ -131,7 +139,7 @@ testTransferArchivesAndRecreates = do
 
   -- Only the owner may transfer.
   submitMustFail p.bravo do
-    exerciseByKeyCmd @FundShare (p.issuer, symbol, p.alpha) Transfer with recipient = p.bravo, amount = 1
+    exerciseByKeyCmd @FundShare (p.issuer, fundSymbol, p.alpha) Transfer with recipient = p.bravo, amount = 1
 
 -- | A transfer of the whole holding leaves no remainder, because a holding of
 -- zero shares is refused by the ensure clause rather than left lying around.
@@ -187,12 +195,17 @@ testProposalCanBeRejectedAndWithdrawn = do
 
   (_, rejected) <- submit p.alpha do
     exerciseCmd original ProposeTransfer with recipient = p.bravo, amount = 200
-  _ <- submit p.bravo do exerciseCmd rejected Reject
+  returned <- submit p.bravo do exerciseCmd rejected Reject
+  -- The return is the owner's to claim; the recipient that declined cannot
+  -- even see it.
+  seenByRecipient <- queryContractId p.bravo returned
+  assertMsg "the recipient can see the sender's returned shares" (isNone seenByRecipient)
+  _ <- submit p.alpha do exerciseCmd returned Claim
   afterReject <- balanceOf p.alpha p.issuer p.alpha
   afterReject === 1_000
 
   (_, withdrawn) <- submit p.alpha do
-    exerciseByKeyCmd @FundShare (p.issuer, symbol, p.alpha) ProposeTransfer with
+    exerciseByKeyCmd @FundShare (p.issuer, fundSymbol, p.alpha) ProposeTransfer with
       recipient = p.bravo
       amount = 200
   submitMustFail p.charlie do exerciseCmd withdrawn Withdraw
@@ -230,7 +243,7 @@ testRedeem = do
   afterPartial === 600
 
   emptied <- submit p.issuer do
-    exerciseByKeyCmd @FundShare (p.issuer, symbol, p.alpha) Redeem with amount = 600
+    exerciseByKeyCmd @FundShare (p.issuer, fundSymbol, p.alpha) Redeem with amount = 600
   assertMsg "a remainder survived a full redemption" (isNone emptied)
   afterFull <- balanceOf p.issuer p.issuer p.alpha
   afterFull === 0
@@ -280,7 +293,7 @@ testEnforceNeedsBothParties = do
   (p, issuance) <- setupIssuance
   _ <- submit p.issuer do exerciseCmd issuance Issue with holder = p.alpha, amount = 1_000
   (_, pledgeCid) <- submit p.alpha do
-    exerciseByKeyCmd @FundShare (p.issuer, symbol, p.alpha) PledgeShares with
+    exerciseByKeyCmd @FundShare (p.issuer, fundSymbol, p.alpha) PledgeShares with
       pledgee = p.bravo
       amount = 600
       reference = "repo NS-ALPHA-1"

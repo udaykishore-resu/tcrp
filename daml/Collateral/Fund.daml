@@ -167,10 +167,14 @@ template TransferProposal
       controller recipient
       do creditHolding issuer symbol recipient quantity
 
-    -- | The recipient declines. The shares go back to the sender.
-    choice Reject : ContractId FundShare
+    -- | The recipient declines. The shares go back to the sender as a
+    -- ShareReturn: the recipient is not a stakeholder of the sender's holding,
+    -- so it cannot look that holding up by key to merge into it — and it
+    -- should not be able to, because that would tell it whether the holding
+    -- exists. The owner folds the return into its holding with Claim.
+    choice Reject : ContractId ShareReturn
       controller recipient
-      do creditHolding issuer symbol owner quantity
+      do create ShareReturn with issuer, owner, symbol, quantity
 
     -- | The sender withdraws the offer before it is answered.
     choice Withdraw : ContractId FundShare
@@ -201,10 +205,12 @@ template Pledge
     maintainer key._1
 
     -- | Return the collateral. Controlled by the pledgee: collateral is
-    -- released by the taker, not taken back by the giver.
-    choice Release : ContractId FundShare
+    -- released by the taker, not taken back by the giver. As with Reject, the
+    -- pledgee cannot see the owner's holding and so cannot merge into it; the
+    -- shares come back as a ShareReturn the owner claims.
+    choice Release : ContractId ShareReturn
       controller pledgee
-      do creditHolding issuer symbol owner quantity
+      do create ShareReturn with issuer, owner, symbol, quantity
 
     -- | Enforce the pledge on a default. Controlled by both parties, because a
     -- unilateral seizure is a dispute rather than a settlement — the agreement
@@ -212,6 +218,30 @@ template Pledge
     choice Enforce : ContractId FundShare
       controller pledgee, owner
       do creditHolding issuer symbol pledgee quantity
+
+-- | Shares on their way back to their owner after a rejection or a release.
+--
+-- It exists because of disclosure. Merging into a holding means looking the
+-- holding up by key, and only a stakeholder of that holding — the owner or
+-- the issuer — may do so; a counterparty that could would learn whether the
+-- holding exists. So the counterparty's choice creates this contract, which
+-- the owner sees and nobody else does, and the owner performs the merge.
+template ShareReturn
+  with
+    issuer : Party
+    owner : Party
+    symbol : Text
+    quantity : Int
+  where
+    signatory issuer
+    observer owner
+
+    ensure quantity > 0
+
+    -- | Fold the returned shares into the owner's holding.
+    choice Claim : ContractId FundShare
+      controller owner
+      do creditHolding issuer symbol owner quantity
 
 -- | The issuer's standing authority to issue a symbol.
 --

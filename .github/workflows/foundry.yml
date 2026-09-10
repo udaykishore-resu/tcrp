@@ -70,11 +70,13 @@ jobs:
           version: stable
 
       # forge-std is not vendored, matching contracts/README.md's stated setup
-      # step. --no-commit because CI's checkout is not a working tree anybody
-      # commits from.
+      # step. Foundry 1.x no longer commits on install (and no longer accepts
+      # --no-commit), so this is a plain install — and it must fail loudly,
+      # because a missing forge-std makes every later step fail with a less
+      # useful message.
       - name: install forge-std
         if: steps.probe.outputs.available == 'true'
-        run: forge install foundry-rs/forge-std --no-commit || true
+        run: forge install foundry-rs/forge-std
 
       - name: forge fmt --check
         if: steps.probe.outputs.available == 'true'

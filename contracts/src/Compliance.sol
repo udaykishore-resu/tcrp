@@ -138,7 +138,8 @@ contract Compliance is AccessControl, ICompliance {
         if (maxHolders != 0 && balanceTo == 0) {
             // A transfer that empties the sender swaps one holder for another
             // rather than adding one, so it does not consume headroom.
-            bool sendersSeatFreed = from != address(0) && !exempt[from] && IERC20Balance(token).balanceOf(from) == amount;
+            bool sendersSeatFreed =
+                from != address(0) && !exempt[from] && IERC20Balance(token).balanceOf(from) == amount;
             uint256 projected = sendersSeatFreed ? holderCount : holderCount + 1;
             if (projected > maxHolders) {
                 return (false, "Compliance: max holders exceeded");

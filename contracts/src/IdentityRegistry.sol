@@ -48,17 +48,17 @@ contract IdentityRegistry is AccessControl, IIdentityRegistry {
     }
 
     /// @notice Registers an identity with its country and claim topics.
-    function registerIdentity(address account, uint16 country_, address claimIssuer, uint256[] calldata topics)
+    function registerIdentity(address account, uint16 country_, address claimIssuer_, uint256[] calldata topics)
         external
         onlyRole(COMPLIANCE_ROLE)
     {
         if (account == address(0)) revert ZeroAddress();
-        _identities[account] = Identity({registered: true, country: country_, claimIssuer: claimIssuer});
+        _identities[account] = Identity({registered: true, country: country_, claimIssuer: claimIssuer_});
         for (uint256 i = 0; i < topics.length; ++i) {
             _claims[account][topics[i]] = true;
             emit ClaimSet(account, topics[i], true);
         }
-        emit IdentityRegistered(account, country_, claimIssuer);
+        emit IdentityRegistered(account, country_, claimIssuer_);
     }
 
     /// @notice Removes an identity. The address keeps any balance it holds.

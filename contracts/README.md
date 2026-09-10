@@ -16,7 +16,7 @@ To run the suite yourself:
 
 ```sh
 cd contracts
-forge install foundry-rs/forge-std --no-commit   # once
+forge install foundry-rs/forge-std   # once
 forge build
 forge test -vvv
 ```
