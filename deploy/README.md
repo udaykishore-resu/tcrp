@@ -204,7 +204,7 @@ which makes no outbound call at all. Delete it in that case.
 
 ### The images are unpinned by digest
 
-`tcrp:0.0.0-dev` in the manifests, `golang:1.24-bookworm` and
+`tcrp:0.0.0-dev` in the manifests, `golang:1.26-bookworm` and
 `gcr.io/distroless/static-debian12:nonroot` in the Dockerfile. A tag is mutable
 and a reproducible build that follows a moving tag is not reproducible. Pin by
 digest before this goes anywhere real.

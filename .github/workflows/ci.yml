@@ -22,7 +22,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.24"
+  # The language version in go.mod stays at 1.24; the toolchain that builds and
+  # ships the code tracks the newest supported release line, because standard
+  # library security fixes land only on supported lines (govulncheck, Oct 2026:
+  # net/http, crypto/tls and crypto/x509 fixes require go1.26.9).
+  GO_VERSION: "1.26"
 
 jobs:
 

@@ -2,7 +2,7 @@
 
 ## Running the gate locally
 
-Everything below runs from a clean clone with a Go 1.24 toolchain and no
+Everything below runs from a clean clone with a Go 1.24 or newer toolchain (CI uses the latest 1.26 patch release) and no
 network. If any of it needs anything else, that is the bug.
 
 ```sh

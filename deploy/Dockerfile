@@ -10,9 +10,9 @@
 # ---------------------------------------------------------------------------
 # The tag is not a digest. A tag is mutable, so this build is reproducible in
 # its inputs from the repository but not in its base image; pin
-# `golang:1.24-bookworm@sha256:...` when that matters and update the pin
+# `golang:1.26-bookworm@sha256:...` when that matters and update the pin
 # deliberately when moving Go versions.
-FROM golang:1.24-bookworm AS build
+FROM golang:1.26-bookworm AS build
 
 WORKDIR /src
 

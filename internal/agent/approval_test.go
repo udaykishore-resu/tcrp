@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -421,5 +422,62 @@ func TestAnApprovalSurvivesARoundTripThroughTheStore(t *testing.T) {
 	again, _ := f.store.LoadApproval(context.Background(), a.ID)
 	if len(again.Grants) != 1 {
 		t.Fatalf("the store handed out a live pointer; grants = %d", len(again.Grants))
+	}
+}
+
+// grantDuringLoadStore runs a hook immediately after the next LoadApproval
+// returns, which lets a test land a Grant in the gap between Wait reading the
+// approval and Wait starting to listen for it.
+type grantDuringLoadStore struct {
+	Store
+	mu   sync.Mutex
+	hook func()
+}
+
+func (g *grantDuringLoadStore) LoadApproval(ctx context.Context, id string) (*Approval, error) {
+	a, err := g.Store.LoadApproval(ctx, id)
+	g.mu.Lock()
+	h := g.hook
+	g.hook = nil
+	g.mu.Unlock()
+	if h != nil {
+		h()
+	}
+	return a, err
+}
+
+// TestWaitDoesNotMissAGrantThatLandsWhileItIsReading pins the lost-wakeup race
+// deterministically: the approval is granted after Wait has read it as pending.
+// A Wait that subscribes only after reading never hears about that grant and
+// blocks until its deadline.
+func TestWaitDoesNotMissAGrantThatLandsWhileItIsReading(t *testing.T) {
+	clock := obs.NewManualClock(testSeedInstant)
+	mem, err := NewMemoryStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &grantDuringLoadStore{Store: mem}
+	f := approvalFixture{
+		svc:   NewApprovalService(store, clock, audit.New(clock), nil, 15*time.Minute),
+		store: mem, clock: clock,
+	}
+	a := f.open(t, 1)
+
+	store.mu.Lock()
+	store.hook = func() {
+		if _, err := f.svc.Grant(context.Background(), a.ID, testRiskManager, "go"); err != nil {
+			t.Errorf("Grant: %v", err)
+		}
+	}
+	store.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	got, err := f.svc.Wait(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("Wait missed a grant that landed while it was reading: %v", err)
+	}
+	if got.Status != ApprovalGranted {
+		t.Fatalf("Wait returned %s", got.Status)
 	}
 }

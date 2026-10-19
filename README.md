@@ -9,7 +9,7 @@ calls, and can move value. Every action it takes is authorized before it
 happens, traced while it happens, and evidenced after it happens, and no path
 through the system reaches money without a human who is not the requester.
 
-**Go 1.24, standard library only, no third-party dependencies, no Docker
+**Go 1.24+ (CI and the release image build on the latest Go 1.26 patch), standard library only, no third-party dependencies, no Docker
 required. It builds and runs its full test suite from a clean clone with no
 network access.** `go.mod` has no `require` block. There is no vendor
 directory, no code generation step, and nothing to install before `go test`.

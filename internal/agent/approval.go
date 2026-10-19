@@ -317,7 +317,18 @@ func (s *ApprovalService) ExpireDue(ctx context.Context) ([]*Approval, error) {
 
 // Wait blocks until the approval reaches a terminal state or ctx is done. It is
 // used by the synchronous CLI path; the HTTP path resumes via the callback.
+//
+// The waiter is registered before the approval is read. Reading first would
+// leave a window in which a Grant commits and notifies between the read and
+// the registration: Wait would then see a stale pending snapshot, miss the only
+// notification there will ever be, and block until its context expires.
 func (s *ApprovalService) Wait(ctx context.Context, id string) (*Approval, error) {
+	ch := make(chan *Approval, 4)
+	s.mu.Lock()
+	s.waiters[id] = append(s.waiters[id], ch)
+	s.mu.Unlock()
+	defer s.unsubscribe(id, ch)
+
 	a, err := s.store.LoadApproval(ctx, id)
 	if err != nil {
 		return nil, err
@@ -325,10 +336,6 @@ func (s *ApprovalService) Wait(ctx context.Context, id string) (*Approval, error
 	if a.Status != ApprovalPending {
 		return a, nil
 	}
-	ch := make(chan *Approval, 4)
-	s.mu.Lock()
-	s.waiters[id] = append(s.waiters[id], ch)
-	s.mu.Unlock()
 	for {
 		select {
 		case <-ctx.Done():
@@ -339,6 +346,25 @@ func (s *ApprovalService) Wait(ctx context.Context, id string) (*Approval, error
 			}
 		}
 	}
+}
+
+// unsubscribe removes one waiter, so a Wait that returns early (a terminal
+// read, an error, a cancelled context) does not leave its channel behind.
+func (s *ApprovalService) unsubscribe(id string, ch chan *Approval) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	chans := s.waiters[id]
+	for i, c := range chans {
+		if c == ch {
+			chans = append(chans[:i], chans[i+1:]...)
+			break
+		}
+	}
+	if len(chans) == 0 {
+		delete(s.waiters, id)
+		return
+	}
+	s.waiters[id] = chans
 }
 
 func (s *ApprovalService) notify(a *Approval) {
