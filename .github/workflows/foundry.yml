@@ -67,7 +67,7 @@ jobs:
         if: steps.probe.outputs.available == 'true'
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          version: v1.8.5  # pinned so a new Foundry release cannot add lint rules that fail an unchanged build
 
       # forge-std is not vendored, matching contracts/README.md's stated setup
       # step. Foundry 1.x no longer commits on install (and no longer accepts

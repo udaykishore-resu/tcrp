@@ -65,8 +65,8 @@ contract BridgeVault is AccessControl {
         if (lockUsed[nonce]) revert NonceUsed(nonce);
         lockUsed[nonce] = true;
         totalLocked += amount;
-        token.bridgeLock(holder, amount, nonce);
         emit Locked(nonce, holder, amount);
+        token.bridgeLock(holder, amount, nonce);
     }
 
     /// @notice Releases shares after a burn on the other network. Agent-only.
@@ -77,7 +77,7 @@ contract BridgeVault is AccessControl {
         if (totalLocked < amount) revert InsufficientLocked(totalLocked, amount);
         unlockUsed[nonce] = true;
         totalLocked -= amount;
-        token.bridgeUnlock(holder, amount, nonce);
         emit Unlocked(nonce, holder, amount);
+        token.bridgeUnlock(holder, amount, nonce);
     }
 }

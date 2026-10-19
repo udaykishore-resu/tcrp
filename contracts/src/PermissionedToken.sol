@@ -179,9 +179,9 @@ contract PermissionedToken is AccessControl, Pausable, IERC20 {
 
         _totalSupply += amount;
         _balances[to] += amount;
-        compliance.created(to, amount);
         emit Transfer(address(0), to, amount);
         emit Minted(to, amount, memo);
+        compliance.created(to, amount);
     }
 
     /// @notice Retires shares on redemption. Agent-only.
@@ -195,9 +195,9 @@ contract PermissionedToken is AccessControl, Pausable, IERC20 {
 
         _balances[from] = held - amount;
         _totalSupply -= amount;
-        compliance.destroyed(from, amount);
         emit Transfer(from, address(0), amount);
         emit Redeemed(from, amount, memo);
+        compliance.destroyed(from, amount);
     }
 
     /// @notice Moves shares without the holder's consent. Agent-only.
@@ -214,9 +214,9 @@ contract PermissionedToken is AccessControl, Pausable, IERC20 {
 
         _balances[from] = held - amount;
         _balances[to] += amount;
-        compliance.transferred(from, to, amount);
         emit Transfer(from, to, amount);
         emit ForcedTransfer(from, to, amount, msg.sender);
+        compliance.transferred(from, to, amount);
     }
 
     // --- bridge -----------------------------------------------------------
@@ -233,9 +233,9 @@ contract PermissionedToken is AccessControl, Pausable, IERC20 {
 
         _balances[holder] = held - amount;
         _balances[bridgeVault] += amount;
-        compliance.transferred(holder, bridgeVault, amount);
         emit Transfer(holder, bridgeVault, amount);
         emit BridgeLocked(holder, amount, nonce);
+        compliance.transferred(holder, bridgeVault, amount);
     }
 
     /// @notice Returns shares from the bridge vault. Vault-only.
@@ -250,9 +250,9 @@ contract PermissionedToken is AccessControl, Pausable, IERC20 {
 
         _balances[bridgeVault] = held - amount;
         _balances[holder] += amount;
-        compliance.transferred(bridgeVault, holder, amount);
         emit Transfer(bridgeVault, holder, amount);
         emit BridgeUnlocked(holder, amount, nonce);
+        compliance.transferred(bridgeVault, holder, amount);
     }
 
     // --- internals --------------------------------------------------------
@@ -266,8 +266,8 @@ contract PermissionedToken is AccessControl, Pausable, IERC20 {
         if (held < amount) revert InsufficientBalance(from, held, amount);
         _balances[from] = held - amount;
         _balances[to] += amount;
-        compliance.transferred(from, to, amount);
         emit Transfer(from, to, amount);
+        compliance.transferred(from, to, amount);
     }
 
     /// @dev The one place every ordinary movement is checked. The order is the

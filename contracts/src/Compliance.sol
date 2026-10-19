@@ -46,6 +46,10 @@ contract Compliance is AccessControl, ICompliance {
     event CountryAllowed(uint16 indexed country, bool allowed);
     event RequiredClaimsUpdated(uint256[] topics);
     event ExemptionUpdated(address indexed account, bool exempt);
+    /// @notice The holder register changed. Off-chain cap-table readers can
+    /// rebuild the count from these events alone instead of replaying balances.
+    event HolderJoined(address indexed account, uint256 holderCount);
+    event HolderLeft(address indexed account, uint256 holderCount);
 
     error AlreadyBound();
     error NotToken(address caller);
@@ -127,6 +131,10 @@ contract Compliance is AccessControl, ICompliance {
         }
         uint256 n = _requiredClaims.length;
         for (uint256 i = 0; i < n; ++i) {
+            // `registry` is immutable and set by the deployer, and the topic
+            // list is bounded by COMPLIANCE_ROLE, so this is a fixed number of
+            // view calls into a trusted contract, not attacker-controlled fan-out.
+            // forge-lint: disable-next-line(calls-loop)
             if (!registry.hasClaim(to, _requiredClaims[i])) {
                 return (false, "Compliance: recipient is missing a required claim");
             }
@@ -138,8 +146,14 @@ contract Compliance is AccessControl, ICompliance {
         if (maxHolders != 0 && balanceTo == 0) {
             // A transfer that empties the sender swaps one holder for another
             // rather than adding one, so it does not consume headroom.
+            // The balance comes from the one token bound in bindToken, and every
+            // credit to an address passes the whitelist and this module, so it
+            // cannot be inflated by an unsolicited transfer. Exact equality is
+            // the rule being expressed: the sender is sending everything.
+            // forge-lint: disable-start(incorrect-strict-equality)
             bool sendersSeatFreed =
                 from != address(0) && !exempt[from] && IERC20Balance(token).balanceOf(from) == amount;
+            // forge-lint: disable-end(incorrect-strict-equality)
             uint256 projected = sendersSeatFreed ? holderCount : holderCount + 1;
             if (projected > maxHolders) {
                 return (false, "Compliance: max holders exceeded");
@@ -168,9 +182,13 @@ contract Compliance is AccessControl, ICompliance {
     /// balance is now zero has left the register.
     function _left(address from, uint256) private {
         if (from == address(0) || exempt[from]) return;
+        // Same token-sourced balance as in canTransfer; zero means the sender
+        // has left the register.
+        // forge-lint: disable-next-line(incorrect-strict-equality)
         if (IERC20Balance(token).balanceOf(from) == 0 && _counted[from]) {
             _counted[from] = false;
             holderCount -= 1;
+            emit HolderLeft(from, holderCount);
         }
     }
 
@@ -184,6 +202,7 @@ contract Compliance is AccessControl, ICompliance {
             if (!_counted[to]) {
                 _counted[to] = true;
                 holderCount += 1;
+                emit HolderJoined(to, holderCount);
             }
         } else {
             _counted[to] = false;
